@@ -1,0 +1,20 @@
+diff --git a/tests/src/components/entry/Dashboard.js b/tests/src/components/entry/Dashboard.js
+index b09f679..0c94f43 100644
+--- a/tests/src/components/entry/Dashboard.js
++++ b/tests/src/components/entry/Dashboard.js
+@@ -509,6 +509,7 @@ export default function Dashboard() {
+ 
+   useEffect(() => {
+     if (!canEdit && isEditorOpen) {
++      clearLandingValidationState();
+       setIsEditorOpen(false);
+     }
+   }, [canEdit, isEditorOpen]);
+@@ -1314,6 +1315,7 @@ export default function Dashboard() {
+                     }`}
+                     onClick={() => {
+                       setIsVisitorMode(true);
++                      clearLandingValidationState();
+                       setIsEditorOpen(false);
+                     }}
+                   >
