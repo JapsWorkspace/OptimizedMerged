@@ -29,7 +29,6 @@ function buildHtml(message) {
   ].join("");
 }
 
-<<<<<<< HEAD
 function buildFromAddress(sender) {
   const cleanSender = String(sender || "").trim();
   if (!cleanSender) return "";
@@ -63,27 +62,6 @@ function getSmtpSender() {
   error.code = "SMTP_CONFIG_MISSING";
   throw error;
 }
-
-=======
-function getConfiguredSender() {
-  const explicitSender = String(process.env.EMAIL_FROM || process.env.SMTP_FROM || "").trim();
-  const smtpUser = String(process.env.SMTP_USER || process.env.EMAIL_USER || "").trim();
-
-  if (explicitSender) return explicitSender;
-  if (smtpUser) return smtpUser;
-
-  const error = new Error(
-    "No email sender configured. Set EMAIL_FROM, SMTP_FROM, SMTP_USER, or EMAIL_USER on the deployed backend."
-  );
-  error.code = "EMAIL_CONFIG_MISSING";
-  throw error;
-}
-
-function buildResendFromAddress(sender) {
-  return `SAGIP BAYAN <${sender}>`;
-}
-
->>>>>>> upstream/final
 async function sendViaResend({ from, to, subject, html, text }) {
   const resendApiKey = String(process.env.RESEND_API_KEY || "").trim();
 
@@ -171,31 +149,18 @@ async function sendEmailNotification({ to, subject, message, html }) {
   try {
     console.log("[email sending]", { to, subject });
 
-<<<<<<< HEAD
-=======
-    const sender = getConfiguredSender();
-    const from = buildResendFromAddress(sender);
->>>>>>> upstream/final
     const preferResend = String(process.env.RESEND_API_KEY || "").trim();
 
     const info = preferResend
       ? await sendViaResend({
-<<<<<<< HEAD
           from: getResendSender(),
-=======
-          from,
->>>>>>> upstream/final
           to,
           subject,
           html: resolvedHtml,
           text,
         })
       : await sendViaSmtp({
-<<<<<<< HEAD
           from: getSmtpSender(),
-=======
-          from,
->>>>>>> upstream/final
           to,
           subject,
           html: resolvedHtml,

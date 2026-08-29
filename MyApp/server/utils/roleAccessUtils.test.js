@@ -2,10 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-<<<<<<< HEAD
-=======
   canViewInventoryType,
->>>>>>> upstream/final
   canManageDonationType,
   canManageInventoryType,
   canManageReliefRequest,
@@ -24,14 +21,11 @@ test("accountant is treated as a privileged staff role", () => {
 test("accountant can manage only monetary inventory and donations", () => {
   assert.equal(canManageInventoryType("accountant", "monetary"), true);
   assert.equal(canManageInventoryType("accountant", "goods"), false);
-<<<<<<< HEAD
-=======
   assert.equal(canViewInventoryType("accountant", "monetary"), true);
   assert.equal(canViewInventoryType("accountant", "goods"), false);
   assert.equal(canViewInventoryType("drrmo", "goods"), true);
   assert.equal(canViewInventoryType("drrmo", "monetary"), false);
   assert.equal(canViewInventoryType("admin", "appliance"), true);
->>>>>>> upstream/final
   assert.equal(
     getInventoryAccessError("accountant", "goods"),
     "Accountant can only manage monetary inventory records here."

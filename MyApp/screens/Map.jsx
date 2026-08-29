@@ -2787,7 +2787,7 @@ const {
         strokeColor="rgba(15,23,42,0)"
         fillColor="rgba(0,0,0,0.58)"
         tappable={false}
-        zIndex={900}
+        zIndex={Platform.OS === "ios" ? 900 : 5}
       />
     );
   }, []);
@@ -4108,6 +4108,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
         onPanDrag={pauseFollowForManualPan}
         onRegionChangeComplete={handleRegionChangeComplete}
       >
+        {Platform.OS !== "ios" && jaenFocusMask}
         {jaenAtmosphereLayer}
        {showHomepageBarangays &&
   homepageBarangays.map((barangay) => {
@@ -4449,7 +4450,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
         {/* Keep this last: iOS can reorder native polygon overlays when a
             module panel removes its layers. A high, final mask preserves the
             dark outside-Jaen treatment without remounting the MapView. */}
-        {jaenFocusMask}
+        {Platform.OS === "ios" && jaenFocusMask}
       </MapView>
 
       {isEvac && isNavigating && (

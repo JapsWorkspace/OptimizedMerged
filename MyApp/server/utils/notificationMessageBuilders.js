@@ -82,11 +82,7 @@ function textToHtml(message) {
 
 function buildAnnouncementSms({ title, description, category }) {
   const cat = String(category || "Announcement").trim();
-<<<<<<< HEAD
-  const shortTitle = summarizeForSms(title, 40);
-=======
   const shortTitle = summarizeForSms(title, 32) || "MDRRMO update";
->>>>>>> upstream/final
   const shortDesc = summarizeForSms(description, 70);
 
   const fallback =
@@ -96,25 +92,16 @@ function buildAnnouncementSms({ title, description, category }) {
       ? "Please read and follow MDRRMO instructions."
       : "Open the app for details.";
 
-<<<<<<< HEAD
-  const details = [shortTitle, shortDesc || fallback].filter(Boolean).join(". ");
-  const message = `This is a sample message: ${details}`;
-=======
   const message = shortDesc
     ? `This is a sample message: ${cat} - ${shortTitle}. ${shortDesc}`
     : `This is a sample message: ${cat} - ${shortTitle}. ${fallback}`;
->>>>>>> upstream/final
 
   return trimSmsMessage(message, 150);
 }
 
 function buildGuidelineSms({ title, description, body, content, category }) {
   const cat = String(category || "Safety").trim();
-<<<<<<< HEAD
-  const shortTitle = summarizeForSms(title, 40);
-=======
   const shortTitle = summarizeForSms(title, 32) || "MDRRMO guide";
->>>>>>> upstream/final
   const shortDesc = summarizeForSms(description || body || content, 70);
 
   let fallback = "Review and stay prepared.";
@@ -127,14 +114,9 @@ function buildGuidelineSms({ title, description, body, content, category }) {
     fallback = "Secure your home and monitor weather updates.";
   }
 
-<<<<<<< HEAD
-  const details = [shortTitle, shortDesc || fallback].filter(Boolean).join(". ");
-  const message = `This is a sample message: ${details}`;
-=======
   const message = shortDesc
     ? `This is a sample message: ${cat} guide - ${shortTitle}. ${shortDesc}`
     : `This is a sample message: ${cat} guide - ${shortTitle}. ${fallback}`;
->>>>>>> upstream/final
 
   return trimSmsMessage(message, 150);
 }

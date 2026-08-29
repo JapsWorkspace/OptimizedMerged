@@ -37,8 +37,6 @@ const canManageInventoryType = (role, type) => {
   return false;
 };
 
-<<<<<<< HEAD
-=======
 const canViewInventoryType = (role, type) => {
   const normalizedRole = normalizeRole(role);
   const normalizedType = String(type || "").trim().toLowerCase();
@@ -57,8 +55,6 @@ const canViewInventoryType = (role, type) => {
 
   return false;
 };
-
->>>>>>> upstream/final
 const getInventoryAccessError = (role, type) => {
   if (canManageInventoryType(role, type)) return "";
   if (isAdminRole(role)) {
@@ -159,10 +155,7 @@ module.exports = {
   isBarangayRole,
   isPrivilegedStaffRole,
   canManageInventoryType,
-<<<<<<< HEAD
-=======
   canViewInventoryType,
->>>>>>> upstream/final
   getInventoryAccessError,
   canManageDonationType,
   getDonationAccessError,

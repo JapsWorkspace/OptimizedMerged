@@ -1067,28 +1067,43 @@ const loginUser = async (req, res) => {
       return res.status(401).json({ message: "Invalid username or password" });
     }
 
+    let restored = false;
     if (user.isArchived) {
+      restored = true;
+      await UserModel.updateOne(
+        { _id: user._id },
+        {
+          $set: { isArchived: false },
+          $unset: { archivedAt: 1, deleteAfter: 1 },
+        }
+      );
       user.isArchived = false;
       user.archivedAt = null;
       user.deleteAfter = null;
     }
 
     if (user.twoFactorEnabled) {
-      await user.save();
       return res.json({
         twoFactor: true,
         userId: user._id,
         email: user.email,
-        restored: true,
+        restored,
       });
     }
 
-    await user.save();
+    const safeUser = user.toObject();
+    delete safeUser.password;
+    delete safeUser.notifications;
+    delete safeUser.notificationTokens;
+    delete safeUser.emailOtp;
+    delete safeUser.emailOtpExpires;
+    delete safeUser.smsOtp;
+    delete safeUser.smsOtpExpires;
 
     res.json({
       twoFactor: false,
-      user,
-      restored: true,
+      user: safeUser,
+      restored,
     });
   } catch (err) {
     console.error(err);
