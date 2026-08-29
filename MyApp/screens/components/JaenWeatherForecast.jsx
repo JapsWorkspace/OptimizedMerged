@@ -211,7 +211,11 @@ function ForecastCard({ item, theme, themed }) {
   );
 }
 
-export default function JaenWeatherForecast({ variant = "panel", onWeatherChange }) {
+export default function JaenWeatherForecast({
+  variant = "panel",
+  onWeatherChange,
+  allowNetworkRefresh = true,
+}) {
   const { theme } = useTheme();
   const themed = useMemo(() => createWeatherThemeStyles(theme), [theme]);
   const [weather, setWeather] = useState(weatherMemoryCache);
@@ -256,14 +260,14 @@ export default function JaenWeatherForecast({ variant = "panel", onWeatherChange
         setWeather(cachedWeather);
         setLoading(false);
       }
-      if (active) fetchWeather(Boolean(cachedWeather));
+      if (active && allowNetworkRefresh) fetchWeather(Boolean(cachedWeather));
     };
 
     hydrateAndRefresh();
     return () => {
       active = false;
     };
-  }, [fetchWeather]);
+  }, [allowNetworkRefresh, fetchWeather]);
 
   const current = weather?.current;
   const isMapOverlay = variant === "map";

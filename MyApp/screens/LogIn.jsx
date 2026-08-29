@@ -17,6 +17,7 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
+import MapView, { PROVIDER_GOOGLE } from "react-native-maps";
 
 import api from "../lib/api";
 import { COLORS, createLoginStyles } from "../Designs/LogIn";
@@ -27,6 +28,12 @@ const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCKOUT_MS = 10 * 60 * 1000;
 const LOGIN_LOCKOUT_MESSAGE =
   "Too many failed attempts. Login is locked for 10 minutes.";
+const JAEN_MAP_WARMUP_CAMERA = {
+  center: { latitude: 15.379677352616156, longitude: 120.87703455602895 },
+  pitch: 0,
+  heading: 0,
+  zoom: 12.7,
+};
 
 export default function LogIn({ navigation }) {
   const initialMetrics = useRef(Dimensions.get("window")).current;
@@ -262,6 +269,27 @@ export default function LogIn({ navigation }) {
 
   return (
     <SafeAreaView style={styles.safe}>
+      {/* Warm Google Maps and the Jaen tiles while the resident enters their
+          credentials. The login artwork remains on top and fully interactive. */}
+      <MapView
+        pointerEvents="none"
+        accessible={false}
+        provider={Platform.OS === "android" ? PROVIDER_GOOGLE : undefined}
+        initialCamera={JAEN_MAP_WARMUP_CAMERA}
+        toolbarEnabled={false}
+        scrollEnabled={false}
+        zoomEnabled={false}
+        rotateEnabled={false}
+        pitchEnabled={false}
+        style={{
+          position: "absolute",
+          top: 0,
+          right: 0,
+          bottom: 0,
+          left: 0,
+          opacity: 0.01,
+        }}
+      />
       <StatusBar style="light" />
       <KeyboardAvoidingView
         style={styles.keyboard}

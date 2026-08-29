@@ -10,8 +10,10 @@ import {
   Alert,
   Animated,
   Dimensions,
+  Easing,
   Image,
   InteractionManager,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   PanResponder,
@@ -34,6 +36,7 @@ import { useFocusEffect, useNavigation, useRoute } from "@react-navigation/nativ
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as ImagePicker from "expo-image-picker";
+import * as ImageManipulator from "expo-image-manipulator";
 import * as turf from "@turf/turf";
 
 import api, { postMultipart } from "../lib/api";
@@ -95,6 +98,22 @@ const JAEN_INITIAL_REGION = {
   latitudeDelta: 0.12,
   longitudeDelta: 0.12,
 };
+// Open closer on first entry after login. Keep JAEN_INITIAL_REGION as the
+// wider reset frame used after dismissals and exploration-limit recovery.
+const JAEN_STARTUP_REGION = {
+  ...JAEN_INITIAL_REGION,
+  latitudeDelta: 0.07,
+  longitudeDelta: 0.07,
+};
+const JAEN_STARTUP_CAMERA = {
+  center: {
+    latitude: JAEN_STARTUP_REGION.latitude,
+    longitude: JAEN_STARTUP_REGION.longitude,
+  },
+  pitch: 0,
+  heading: 0,
+  zoom: 12.7,
+};
 const MAP_MAX_LATITUDE_DELTA = 0.3;
 const MAP_MAX_LONGITUDE_DELTA = 0.3;
 // Allow users to explore well beyond Jaen before returning to the default
@@ -131,7 +150,9 @@ const NAV_PANEL_HALF_OFFSET = Math.round(NAV_PANEL_COLLAPSED_OFFSET / 2);
 const NAV_PANEL_DEFAULT_OFFSET = Math.min(42, NAV_PANEL_HALF_OFFSET);
 const NAV_PANEL_MAX_OFFSET = NAV_PANEL_COLLAPSED_OFFSET;
 const INCIDENT_IMAGE_LIMIT = 2;
-const INCIDENT_IMAGE_MAX_BYTES = 15 * 1024 * 1024;
+const INCIDENT_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const INCIDENT_IMAGE_MAX_WIDTH = 1600;
+const INCIDENT_IMAGE_COMPRESS_QUALITY = 0.55;
 const SIMILAR_INCIDENT_TITLE = "Similar Incident Already Reported";
 const SIMILAR_INCIDENT_MESSAGE =
   "A similar incident has already been reported in this area. Please check the existing report instead.";
@@ -673,6 +694,30 @@ function normalizeIncidentPickerAsset(asset, index = 0) {
   };
 }
 
+async function optimizeIncidentPickerAsset(asset, index = 0) {
+  if (!asset?.uri) return null;
+
+  const actions =
+    Number(asset.width || 0) > INCIDENT_IMAGE_MAX_WIDTH
+      ? [{ resize: { width: INCIDENT_IMAGE_MAX_WIDTH } }]
+      : [];
+  const optimized = await ImageManipulator.manipulateAsync(asset.uri, actions, {
+    compress: INCIDENT_IMAGE_COMPRESS_QUALITY,
+    format: ImageManipulator.SaveFormat.JPEG,
+  });
+
+  return normalizeIncidentPickerAsset(
+    {
+      ...asset,
+      ...optimized,
+      fileName: `incident-photo-${index + 1}.jpg`,
+      mimeType: "image/jpeg",
+      fileSize: 0,
+    },
+    index
+  );
+}
+
 function validateIncidentImages(images) {
   const validImages = safeArray(images).filter((item) => item?.uri);
 
@@ -688,7 +733,7 @@ function validateIncidentImages(images) {
   const oversized = validImages.find(
     (item) => Number(item.size || 0) > INCIDENT_IMAGE_MAX_BYTES
   );
-  if (oversized) return "Each incident photo must be 15 MB or smaller.";
+  if (oversized) return "Each incident photo must be 8 MB or smaller.";
 
   return "";
 }
@@ -1985,6 +2030,7 @@ const [incidentDebugMode, setIncidentDebugMode] = useState(false);
 const [evacGpsDebugMode, setEvacGpsDebugMode] = useState(false);
 const [evacGpsLocating, setEvacGpsLocating] = useState(false);
 const [gpsLocation, setGpsLocation] = useState(null);
+const [mapDecorationsReady, setMapDecorationsReady] = useState(false);
 
 const {
   activeMapModule,
@@ -2010,6 +2056,8 @@ const {
   setShowFloodMap,
   setShowEarthquakeHazard,
   isBottomNavInteracting,
+  isBaseMapLoaded,
+  setIsBaseMapLoaded,
 } = useContext(MapContext);
   const { addNotification } = useContext(NotificationContext) || {};
 
@@ -2025,6 +2073,9 @@ const {
   const evacRouteManualCameraRef = useRef(false);
   const evacRouteAutoFitKeyRef = useRef("");
   const moduleDismissCameraTimerRef = useRef(null);
+  const mapDecorationsTimerRef = useRef(null);
+  const startupCameraTimersRef = useRef([]);
+  const incidentSubmitInFlightRef = useRef(false);
   const isModuleDismissTransitionRef = useRef(false);
   const [isNavigating, setIsNavigating] = useState(false);
   const [followMode, setFollowMode] = useState(false);
@@ -2037,6 +2088,30 @@ const {
   const [isModuleDismissTransitioning, setIsModuleDismissTransitioning] = useState(false);
   const [isReturningToIncidentMap, setIsReturningToIncidentMap] = useState(false);
   const [hazardMode, setHazardMode] = useState("flood");
+
+  useEffect(
+    () => () => {
+      if (mapDecorationsTimerRef.current) {
+        clearTimeout(mapDecorationsTimerRef.current);
+      }
+      startupCameraTimersRef.current.forEach(clearTimeout);
+      startupCameraTimersRef.current = [];
+    },
+    []
+  );
+
+  const enforceStartupCamera = useCallback(() => {
+    mapRef.current?.setCamera(JAEN_STARTUP_CAMERA);
+  }, []);
+
+  const scheduleStartupCameraRetries = useCallback(() => {
+    startupCameraTimersRef.current.forEach(clearTimeout);
+    startupCameraTimersRef.current = [80, 280, 650].map((delay) =>
+      setTimeout(() => {
+        enforceStartupCamera();
+      }, delay)
+    );
+  }, [enforceStartupCamera]);
   const routeStartCoordinate = useMemo(() => {
     const gpsCoordinate = toMarkerCoordinate(gpsLocation);
     return evacGpsDebugMode && gpsCoordinate ? gpsCoordinate : USER_POS;
@@ -2787,7 +2862,7 @@ const {
         strokeColor="rgba(15,23,42,0)"
         fillColor="rgba(0,0,0,0.58)"
         tappable={false}
-        zIndex={Platform.OS === "ios" ? 900 : 5}
+        zIndex={900}
       />
     );
   }, []);
@@ -3389,7 +3464,7 @@ const shouldShowIncidentMarkers =
   ]);
 
   const handlePanelDismissStart = useCallback((dismissedModule) => {
-    if (["barangay", "hazard", "flood", "earthquake", "evac"].includes(dismissedModule)) {
+    if (["incident", "barangay", "hazard", "flood", "earthquake", "evac"].includes(dismissedModule)) {
       // Begin restoring the lightweight Incident presentation while the sheet
       // is still moving, rather than waiting for its spring to finish.
       setIsReturningToIncidentMap(true);
@@ -3398,7 +3473,7 @@ const shouldShowIncidentMarkers =
 
   const handlePanelFullyDismiss = useCallback(
     (dismissedModule) => {
-      if (!["barangay", "hazard", "flood", "earthquake", "evac"].includes(dismissedModule)) {
+      if (!["incident", "barangay", "hazard", "flood", "earthquake", "evac"].includes(dismissedModule)) {
         return;
       }
 
@@ -3797,7 +3872,9 @@ if (!incidentDebugMode && !currentLocationFeature) {
         mediaTypes: ["images"],
         allowsMultipleSelection: true,
         selectionLimit: INCIDENT_IMAGE_LIMIT,
-        quality: 0.7,
+        quality: 0.6,
+        base64: false,
+        exif: false,
         legacy: Platform.OS === "android",
       });
 
@@ -3805,10 +3882,15 @@ if (!incidentDebugMode && !currentLocationFeature) {
         return;
       }
 
-      const pickedImages = result.assets
+      const pickedImages = [];
+      for (const [index, asset] of result.assets
         .slice(0, INCIDENT_IMAGE_LIMIT)
-        .map(normalizeIncidentPickerAsset)
-        .filter(Boolean);
+        .entries()) {
+        // Process sequentially to avoid holding multiple full-resolution
+        // camera images in memory at the same time on lower-end phones.
+        const optimized = await optimizeIncidentPickerAsset(asset, index);
+        if (optimized) pickedImages.push(optimized);
+      }
 
       applyIncidentImages(pickedImages, true);
     } catch (error) {
@@ -3831,14 +3913,16 @@ if (!incidentDebugMode && !currentLocationFeature) {
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: ["images"],
         allowsEditing: false,
-        quality: 0.7,
+        quality: 0.6,
+        base64: false,
+        exif: false,
       });
 
       if (result.canceled || !Array.isArray(result.assets) || !result.assets[0]?.uri) {
         return;
       }
 
-      const photo = normalizeIncidentPickerAsset(result.assets[0], 0);
+      const photo = await optimizeIncidentPickerAsset(result.assets[0], 0);
       applyIncidentImages(photo ? [photo] : [], false);
     } catch (error) {
       console.log("[incident camera picker failed]", error?.message || error);
@@ -3858,7 +3942,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
     setIncidentImageError("");
   }, [incidentImage]);
   const submitIncident = useCallback(async () => {
-  if (incidentBusy) return;
+  if (incidentBusy || incidentSubmitInFlightRef.current) return false;
   const nextErrors = {};
 
   if (!incidentDraft.type || !incidentDraft.level) {
@@ -3953,6 +4037,8 @@ if (!incidentDebugMode && !currentLocationFeature) {
 
   setIncidentErrors({});
 
+  incidentSubmitInFlightRef.current = true;
+  Keyboard.dismiss();
   setIncidentBusy(true);
 
   try {
@@ -3993,20 +4079,6 @@ if (!incidentDebugMode && !currentLocationFeature) {
     const formData = buildIncidentFormData(uploadParameters, imagesToUpload);
 
     await postMultipart("/incident/register", formData);
-    if (typeof refreshIncidents === "function") {
-      await refreshIncidents();
-    } else {
-      const incidentsRes = await api.get("/incident/getIncidents");
-      const freshIncidents = Array.isArray(incidentsRes?.data)
-        ? incidentsRes.data
-        : [];
-
-      if (typeof setIncidents === "function") {
-        setIncidents(
-          freshIncidents.filter((incident) => isPublicIncident(incident))
-        );
-      }
-    }
 
     Alert.alert(
       "Incident Submitted",
@@ -4017,6 +4089,17 @@ if (!incidentDebugMode && !currentLocationFeature) {
     setIncidentImage(null);
     setIncidentImageError("");
     setQuickReportVisible(false);
+
+    // Refresh after the submit UI has settled. The report is pending review,
+    // so blocking success on a full incident-list download only adds memory
+    // pressure and cannot make the new marker appear yet.
+    InteractionManager.runAfterInteractions(() => {
+      if (typeof refreshIncidents === "function") {
+        refreshIncidents().catch((error) =>
+          console.log("[incidents] post-submit refresh failed:", error?.message)
+        );
+      }
+    });
     return true;
   } catch (err) {
     console.log("Incident submit failed:", {
@@ -4036,6 +4119,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
     );
     return false;
   } finally {
+    incidentSubmitInFlightRef.current = false;
     setIncidentBusy(false);
   }
 }, [
@@ -4089,7 +4173,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
         ref={mapRef}
         provider={Platform.OS === "android" ? PROVIDER_GOOGLE : undefined}
         style={styles.map}
-        initialRegion={JAEN_INITIAL_REGION}
+        initialCamera={JAEN_STARTUP_CAMERA}
         minZoomLevel={10}
         showsUserLocation={false}
         showsMyLocationButton={false}
@@ -4097,6 +4181,32 @@ if (!incidentDebugMode && !currentLocationFeature) {
         customMapStyle={[]}
         onMapReady={() => {
           if (__DEV__) console.log("[performance] base map ready", Date.now());
+          // Reinforce the native initialCamera once the map surface exists.
+          // setCamera is immediate and cannot be superseded by a pending
+          // zero-duration region animation during Google Maps startup.
+          enforceStartupCamera();
+          scheduleStartupCameraRetries();
+          // The Jaen boundary is local GeoJSON and does not need to wait for
+          // remote Google tiles. Reveal it with the native map surface.
+          setMapDecorationsReady(true);
+          if (mapDecorationsTimerRef.current) {
+            clearTimeout(mapDecorationsTimerRef.current);
+          }
+          // Only unlock deferred network requests here as a fallback for
+          // devices that do not emit onMapLoaded reliably.
+          mapDecorationsTimerRef.current = setTimeout(() => {
+            mapDecorationsTimerRef.current = null;
+            setIsBaseMapLoaded?.(true);
+          }, 1800);
+        }}
+        onMapLoaded={() => {
+          if (__DEV__) console.log("[performance] base map tiles loaded", Date.now());
+          enforceStartupCamera();
+          setIsBaseMapLoaded?.(true);
+          if (mapDecorationsTimerRef.current) {
+            clearTimeout(mapDecorationsTimerRef.current);
+            mapDecorationsTimerRef.current = null;
+          }
         }}
         scrollEnabled={!isBottomNavInteracting && !isPanelGestureActive && !isModuleDismissTransitioning && !isReturningToIncidentMap}
         zoomEnabled={!isBottomNavInteracting && !isPanelGestureActive && !isModuleDismissTransitioning && !isReturningToIncidentMap}
@@ -4108,7 +4218,8 @@ if (!incidentDebugMode && !currentLocationFeature) {
         onPanDrag={pauseFollowForManualPan}
         onRegionChangeComplete={handleRegionChangeComplete}
       >
-        {Platform.OS !== "ios" && jaenFocusMask}
+        {mapDecorationsReady && (
+          <>
         {jaenAtmosphereLayer}
        {showHomepageBarangays &&
   homepageBarangays.map((barangay) => {
@@ -4450,7 +4561,9 @@ if (!incidentDebugMode && !currentLocationFeature) {
         {/* Keep this last: iOS can reorder native polygon overlays when a
             module panel removes its layers. A high, final mask preserves the
             dark outside-Jaen treatment without remounting the MapView. */}
-        {Platform.OS === "ios" && jaenFocusMask}
+        {jaenFocusMask}
+          </>
+        )}
       </MapView>
 
       {isEvac && isNavigating && (
@@ -4505,7 +4618,11 @@ if (!incidentDebugMode && !currentLocationFeature) {
         ]}
         pointerEvents={showMapWeather ? "box-none" : "none"}
       >
-        <JaenWeatherForecast variant="map" onWeatherChange={handleWeatherChange} />
+        <JaenWeatherForecast
+          variant="map"
+          onWeatherChange={handleWeatherChange}
+          allowNetworkRefresh={isBaseMapLoaded}
+        />
       </Animated.View>
 
       {activeModule && (
@@ -4947,7 +5064,6 @@ function ModulePanel({
       onStartShouldSetPanResponder: () => false,
       onStartShouldSetPanResponderCapture: () => false,
       onMoveShouldSetPanResponder: (_, gesture) => {
-        if (incidentFocusedFieldRef.current) return false;
         return (
           Math.abs(gesture.dy) > PANEL_DRAG_THRESHOLD &&
           Math.abs(gesture.dy) > Math.abs(gesture.dx) * 1.15
@@ -4956,6 +5072,10 @@ function ModulePanel({
       onMoveShouldSetPanResponderCapture: () => false,
 
       onPanResponderGrant: () => {
+        // The drag handle must remain usable even after editing a long field.
+        // Clear stale input focus and close the keyboard before moving the sheet.
+        incidentFocusedFieldRef.current = null;
+        Keyboard.dismiss();
         onPanelGestureStateChangeRef.current?.(true);
         setIsPanelHidden(false);
         translateY.stopAnimation((value) => {
@@ -5268,7 +5388,8 @@ function ModulePanel({
     nestedScrollEnabled
     directionalLockEnabled
     keyboardShouldPersistTaps="handled"
-    keyboardDismissMode="none"
+    keyboardDismissMode="on-drag"
+    removeClippedSubviews={false}
     stickyHeaderIndices={[0]}
     contentContainerStyle={styles.incidentFormScrollContent}
   >
@@ -7786,7 +7907,7 @@ const styles = StyleSheet.create({
   },
 
   dragHandleTouchTarget: {
-    width: 116,
+    width: "100%",
     minHeight: 42,
     alignItems: "center",
     justifyContent: "center",

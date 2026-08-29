@@ -97,6 +97,7 @@ function hasValidIncidentCoordinates(incident) {
 
 export default function AppShell() {
   const { theme } = useTheme();
+  const [isBaseMapLoaded, setIsBaseMapLoaded] = useState(false);
   const [activeMapModule, setActiveMapModule] = useState(null);
   const [panelState, setPanelState] = useState("HIDDEN");
   const [panelY, setPanelY] = useState(null);
@@ -201,6 +202,8 @@ export default function AppShell() {
 
   useFocusEffect(
     useCallback(() => {
+      if (!isBaseMapLoaded) return undefined;
+
       let mounted = true;
       const task = InteractionManager.runAfterInteractions(() => {
         refreshIncidents().catch((err) => {
@@ -221,7 +224,7 @@ export default function AppShell() {
         mounted = false;
         task.cancel();
       };
-    }, [refreshIncidents])
+    }, [isBaseMapLoaded, refreshIncidents])
   );
 
   const mapContextValue = useMemo(
@@ -264,6 +267,8 @@ export default function AppShell() {
 
       isBottomNavInteracting,
       setIsBottomNavInteracting: setBottomNavInteracting,
+      isBaseMapLoaded,
+      setIsBaseMapLoaded,
     }),
     [
       activeMapModule,
@@ -281,6 +286,7 @@ export default function AppShell() {
       showFloodMap,
       showEarthquakeHazard,
       isBottomNavInteracting,
+      isBaseMapLoaded,
       setBottomNavInteracting,
     ]
   );

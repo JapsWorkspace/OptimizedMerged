@@ -276,6 +276,8 @@ const styles = StyleSheet.create({
   },
   dashboardHeader: {
     height: 330,
+    // Extend only the painted gradient while keeping the account content high.
+    marginBottom: -155,
     marginHorizontal: -12,
     paddingTop: 40,
     paddingHorizontal: 12,
