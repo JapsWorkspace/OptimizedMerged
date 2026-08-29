@@ -7,6 +7,7 @@ import React, {
   useState,
 } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Animated,
   Dimensions,
@@ -2860,7 +2861,7 @@ const {
         coordinates={OUTSIDE_JAEN_MASK}
         holes={holes}
         strokeColor="rgba(15,23,42,0)"
-        fillColor="rgba(0,0,0,0.58)"
+        fillColor="rgba(0,0,0,0.78)"
         tappable={false}
         zIndex={900}
       />
@@ -4558,12 +4559,13 @@ if (!incidentDebugMode && !currentLocationFeature) {
           </SafeMarker>
         )}
 
-        {/* Keep this last: iOS can reorder native polygon overlays when a
-            module panel removes its layers. A high, final mask preserves the
-            dark outside-Jaen treatment without remounting the MapView. */}
-        {jaenFocusMask}
           </>
         )}
+
+        {/* Keep the mask mounted independently from deferred/module layers.
+            This prevents incident-mode rerenders from exposing the map
+            outside Jaen on either Android or iOS. */}
+        {jaenFocusMask}
       </MapView>
 
       {isEvac && isNavigating && (
