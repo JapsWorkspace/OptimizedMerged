@@ -1,0 +1,20 @@
+diff --git a/tests/src/components/entry/Dashboard.js b/tests/src/components/entry/Dashboard.js
+index b33d44d..3694075 100644
+--- a/tests/src/components/entry/Dashboard.js
++++ b/tests/src/components/entry/Dashboard.js
+@@ -994,11 +994,13 @@ export default function Dashboard() {
+   }
+ 
+   function removeItem(section, id) {
++    if ((draftContent[section] || []).length <= 1) return;
++
++    // Array-indexed validation keys no longer match after an item is removed.
++    clearLandingValidationState();
+     setDraftContent((prev) => {
+       const currentItems = prev[section] || [];
+ 
+-      if (currentItems.length <= 1) return prev;
+-
+       return {
+         ...prev,
+         [section]: currentItems.filter((item) => item.id !== id),
