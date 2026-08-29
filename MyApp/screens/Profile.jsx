@@ -275,7 +275,7 @@ const styles = StyleSheet.create({
     paddingBottom: 46,
   },
   dashboardHeader: {
-    height: 195,
+    height: 330,
     marginHorizontal: -12,
     paddingTop: 40,
     paddingHorizontal: 12,

@@ -2051,6 +2051,21 @@ const {
   const activeModule = activeMapModule;
   const showMapWeather =
     isReturningToIncidentMap || (!activeModule && panelState !== "NAVIGATION");
+  const weatherRevealAnim = useRef(
+    new Animated.Value(showMapWeather ? 1 : 0)
+  ).current;
+
+  useEffect(() => {
+    weatherRevealAnim.stopAnimation();
+    Animated.timing(weatherRevealAnim, {
+      toValue: showMapWeather ? 1 : 0,
+      duration: showMapWeather ? 260 : 170,
+      easing: showMapWeather
+        ? Easing.out(Easing.cubic)
+        : Easing.in(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  }, [showMapWeather, weatherRevealAnim]);
   const isEvac = activeModule === "evac" && !isReturningToIncidentMap;
   const isIncident = activeModule === "incident";
   const isFlood =
@@ -4472,12 +4487,25 @@ if (!incidentDebugMode && !currentLocationFeature) {
       )}
 
 
-      <View
-        style={[styles.mapWeatherOverlay, !showMapWeather && styles.mapWeatherOverlayHidden]}
+      <Animated.View
+        style={[
+          styles.mapWeatherOverlay,
+          {
+            opacity: weatherRevealAnim,
+            transform: [
+              {
+                translateY: weatherRevealAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [-44, 0],
+                }),
+              },
+            ],
+          },
+        ]}
         pointerEvents={showMapWeather ? "box-none" : "none"}
       >
         <JaenWeatherForecast variant="map" onWeatherChange={handleWeatherChange} />
-      </View>
+      </Animated.View>
 
       {activeModule && (
         <ModulePanel

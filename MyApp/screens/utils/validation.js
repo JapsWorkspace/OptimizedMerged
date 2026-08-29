@@ -90,7 +90,6 @@ export function sanitizeIncidentText(value, maxLength = INCIDENT_DESCRIPTION_MAX
   return sanitizeTextInput(value, { maxLength }).replace(/[^A-Za-z0-9\s,.\-()/#]/g, "");
 }
 
-<<<<<<< HEAD
 // Notes are sanitized as the user types, so preserve trailing whitespace long
 // enough to allow normal multi-word input while removing unsupported symbols.
 export function sanitizeIncidentNotesInput(
@@ -107,8 +106,6 @@ export function sanitizeIncidentNotesInput(
     : cleaned;
 }
 
-=======
->>>>>>> upstream/final
 export function sanitizeFreeTextInput(
   value,
   maxLength = INCIDENT_DESCRIPTION_MAX_LENGTH
@@ -223,7 +220,6 @@ export function getPasswordError(value, { minLength = 8, maxLength = 64 } = {}) 
   return "";
 }
 
-<<<<<<< HEAD
 export function sanitizeNumericReference(value, maxLength = 80) {
   return asString(value).replace(/\D/g, "").slice(0, maxLength);
 }
@@ -257,8 +253,6 @@ export function getForgotPasswordPasswordError(
   return "";
 }
 
-=======
->>>>>>> upstream/final
 export function getPasswordRequirements(value, { minLength = 8, maxLength = 64 } = {}) {
   const password = asString(value).replace(INVISIBLE_WHITESPACE_REGEX, "").trim();
 

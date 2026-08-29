@@ -526,7 +526,6 @@ export function NotificationProvider({ children }) {
   }, [refreshNotifications]);
 
   useEffect(() => {
-<<<<<<< HEAD
     if (!user?._id) return undefined;
 
     const refreshTimer = setInterval(() => {
@@ -539,8 +538,6 @@ export function NotificationProvider({ children }) {
   }, [refreshNotifications, user?._id]);
 
   useEffect(() => {
-=======
->>>>>>> upstream/final
     if (!user?._id || registeredPushUserRef.current === String(user._id)) return;
 
     let cancelled = false;

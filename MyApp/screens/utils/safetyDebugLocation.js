@@ -16,7 +16,6 @@ const JAEN_DEBUG_POINTS = [
   { latitude: 15.4092, longitude: 120.8918 },
 ];
 
-<<<<<<< HEAD
 const JAEN_DEBUG_BOUNDS = {
   north: 15.42,
   south: 15.28,
@@ -27,8 +26,6 @@ const JAEN_DEBUG_BOUNDS = {
 const DEBUG_BOUNDARY_MARGIN = 0.0015;
 const DEBUG_LOCATION_ATTEMPTS = 96;
 
-=======
->>>>>>> upstream/final
 function hashString(value) {
   return String(value || "debug-user").split("").reduce((hash, char) => {
     const nextHash = (hash << 5) - hash + char.charCodeAt(0);
@@ -40,13 +37,10 @@ function roundCoordinate(value) {
   return Number(value.toFixed(6));
 }
 
-<<<<<<< HEAD
 function hashToUnitInterval(value) {
   return (hashString(value) >>> 0) / 4294967295;
 }
 
-=======
->>>>>>> upstream/final
 function pointInRing(latitude, longitude, ring) {
   let inside = false;
 
@@ -92,7 +86,6 @@ function isInsideJaenBoundary(latitude, longitude) {
 }
 
 export function generateSeededJaenDebugLocation(userId) {
-<<<<<<< HEAD
   const normalizedUserId = String(userId || "debug-user");
   const latitudeSpan =
     JAEN_DEBUG_BOUNDS.north - JAEN_DEBUG_BOUNDS.south - DEBUG_BOUNDARY_MARGIN * 2;
@@ -122,23 +115,6 @@ export function generateSeededJaenDebugLocation(userId) {
 
   const fallbackStart = (hashString(normalizedUserId) >>> 0) % JAEN_DEBUG_POINTS.length;
   const fallback = [...JAEN_DEBUG_POINTS.slice(fallbackStart), ...JAEN_DEBUG_POINTS.slice(0, fallbackStart)].find((item) =>
-=======
-  const seed = Math.abs(hashString(userId));
-  const point = JAEN_DEBUG_POINTS[seed % JAEN_DEBUG_POINTS.length] || JAEN_DEBUG_POINTS[0];
-  const offsetSeed = Math.abs(hashString(`${userId}:offset`));
-  const latOffset = (((offsetSeed % 7) - 3) * 0.00012);
-  const lngOffset = ((((Math.floor(offsetSeed / 7) % 7) - 3)) * 0.00012);
-  const candidate = {
-    latitude: roundCoordinate(point.latitude + latOffset),
-    longitude: roundCoordinate(point.longitude + lngOffset),
-  };
-
-  if (isInsideJaenBoundary(candidate.latitude, candidate.longitude)) {
-    return candidate;
-  }
-
-  const fallback = JAEN_DEBUG_POINTS.find((item) =>
->>>>>>> upstream/final
     isInsideJaenBoundary(item.latitude, item.longitude)
   );
 
