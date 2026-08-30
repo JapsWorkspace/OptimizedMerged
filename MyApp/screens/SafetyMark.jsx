@@ -41,7 +41,6 @@ import { UserContext } from "./UserContext";
 import { NotificationContext } from "./contexts/NotificationContext";
 import { useTheme } from "./contexts/ThemeContext";
 import jaenGeoJSON from "./data/jaen.json";
-import { generateSeededJaenDebugLocation } from "./utils/safetyDebugLocation";
 import { isPointInsideJaen } from "./utils/jaenBounds";
 import {
   normalizeCoordinate,
@@ -63,6 +62,8 @@ const JAEN_INITIAL_REGION = {
 
 const SAFETY_CONNECTIONS_CACHE_KEY = "sagipbayan.safetyMark.connections.v1";
 const SAFETY_DEBUG_MARKERS_CACHE_KEY = "sagipbayan.safetyMark.debugMarkers.v1";
+const SAFETY_DEBUG_FEATURE_ENABLED =
+  String(process.env.EXPO_PUBLIC_ENABLE_SAFETY_DEBUG || "true").toLowerCase() !== "false";
 
 const OUTSIDE_JAEN_MASK = [
   { latitude: 16.2, longitude: 119.8 },
@@ -511,6 +512,8 @@ function normalizeDebugMarker(marker, currentUserId) {
     isCurrentUser: String(marker.userId) === String(currentUserId),
     insideJaen: true,
     debugMode: true,
+    shareSafetyLocation: marker?.shareSafetyLocation === true,
+    privateOnly: marker?.privateOnly === true,
     updatedLabel: timeAgo(marker.updatedAt),
   };
 }
@@ -539,29 +542,6 @@ function applySafetyStatusToMarker(marker, safetyStatus) {
 
 function isCurrentUserMarker(marker, userId) {
   return String(marker?.userId || marker?.id || "") === String(userId || "");
-}
-
-function buildCurrentUserDebugMarker(user, safetyStatus) {
-  if (!user?._id) return null;
-  const normalizedStatus = normalizeSafetyStatusValue(safetyStatus);
-
-  return {
-    id: String(user._id),
-    userId: String(user._id),
-    username:
-      [user?.fname, user?.lname].filter(Boolean).join(" ").trim() ||
-      user?.username ||
-      "You",
-    avatar: user?.avatar ? resolveAvatarPath(user.avatar) : null,
-    safetyStatus: normalizedStatus,
-    safetyColor: getSafetyColor(normalizedStatus),
-    safetyLabel: getSafetyLabel(normalizedStatus),
-    coordinate: generateSeededJaenDebugLocation(user._id),
-    isCurrentUser: true,
-    insideJaen: true,
-    debugMode: true,
-    shareSafetyLocation: true,
-  };
 }
 
 function createSafetyThemeStyles(theme) {
@@ -780,6 +760,7 @@ export default function SafetyMark() {
   const [isOffline, setIsOffline] = useState(false);
   const [mongoBarangays, setMongoBarangays] = useState(null);
   const [liveGpsLocation, setLiveGpsLocation] = useState(null);
+  const [liveLocationState, setLiveLocationState] = useState("disabled");
   const [, setAssetBaseVersion] = useState(0);
   const [joinRequestModalVisible, setJoinRequestModalVisible] = useState(false);
   const [joinRequestModalMessage, setJoinRequestModalMessage] = useState(
@@ -973,6 +954,10 @@ export default function SafetyMark() {
   }, [user?._id]);
 
   const fetchDebugMarkers = useCallback(async () => {
+    if (!SAFETY_DEBUG_FEATURE_ENABLED) {
+      setDebugMarkers([]);
+      return [];
+    }
     try {
       const res = await getSafetyDebugLocations(user?._id);
       const rawMarkers = getDebugMarkerPayload(res?.data);
@@ -1023,9 +1008,7 @@ export default function SafetyMark() {
     async (status = localSafetyStatus) => {
       if (!user?._id) return null;
 
-      const coordinate = generateSeededJaenDebugLocation(user._id);
-      console.log("[debug-location] current user:", user._id);
-      console.log("[debug-location] generated coordinate:", coordinate);
+      console.log("[debug-location] restoring or creating location for:", user._id);
 
       const payload = {
         userId: user._id,
@@ -1034,8 +1017,6 @@ export default function SafetyMark() {
           user?.username ||
           "User",
         avatar: user?.avatar || "",
-        latitude: coordinate.latitude,
-        longitude: coordinate.longitude,
         safetyStatus: status,
         debugMode: true,
       };
@@ -1047,7 +1028,13 @@ export default function SafetyMark() {
         longitude: res?.data?.marker?.longitude,
         debugMode: res?.data?.marker?.debugMode,
       });
-      return res?.data?.marker || null;
+      return res?.data?.marker
+        ? {
+            ...res.data.marker,
+            shareSafetyLocation: res?.data?.shareSafetyLocation === true,
+            privateOnly: res?.data?.shareSafetyLocation !== true,
+          }
+        : null;
     },
     [localSafetyStatus, user]
   );
@@ -1081,8 +1068,7 @@ export default function SafetyMark() {
           return updatedItems;
         }
 
-        const localMarker = buildCurrentUserDebugMarker(user, normalizedStatus);
-        return localMarker ? dedupeMarkersByUserId([localMarker, ...updatedItems]) : updatedItems;
+        return updatedItems;
       });
       setDebugMarkers((items) => {
         console.log("[markers] local state updated:", items);
@@ -1121,6 +1107,9 @@ export default function SafetyMark() {
       Platform.OS === "web"
     ) {
       setLiveGpsLocation(null);
+      setLiveLocationState(
+        !isSafetyLocationSharingEnabled ? "disabled" : "unavailable"
+      );
       return undefined;
     }
 
@@ -1136,6 +1125,7 @@ export default function SafetyMark() {
 
         if (permission.status !== "granted") {
           console.log("[debug-location] live GPS permission denied");
+          setLiveLocationState("unavailable");
           return;
         }
 
@@ -1148,6 +1138,11 @@ export default function SafetyMark() {
           if (!coordinate || !mounted) return;
 
           setLiveGpsLocation(coordinate);
+          setLiveLocationState(
+            isPointInsideJaen(coordinate.latitude, coordinate.longitude)
+              ? "shared"
+              : "outside"
+          );
 
           try {
             await api.put(`/user/location/${user._id}`, {
@@ -1173,6 +1168,7 @@ export default function SafetyMark() {
           applyPosition
         );
       } catch (err) {
+        setLiveLocationState("unavailable");
         console.log("[debug-location] live GPS failed:", err?.message);
       }
     }
@@ -1186,7 +1182,7 @@ export default function SafetyMark() {
   }, [isSafetyLocationSharingEnabled, safetyDebugMode, user?._id]);
 
   useEffect(() => {
-    if (!safetyDebugMode || !user?._id) return undefined;
+    if (!SAFETY_DEBUG_FEATURE_ENABLED || !safetyDebugMode || !user?._id) return undefined;
 
     fetchDebugMarkers();
     debugPollRef.current = setInterval(fetchDebugMarkers, 3000);
@@ -1200,7 +1196,7 @@ export default function SafetyMark() {
   }, [fetchDebugMarkers, safetyDebugMode, user?._id]);
 
   useEffect(() => {
-    if (!safetyDebugMode || !user?._id) return;
+    if (!SAFETY_DEBUG_FEATURE_ENABLED || !safetyDebugMode || !user?._id) return;
 
     syncOwnDebugLocation(localSafetyStatus)
       .then(fetchDebugMarkers)
@@ -1315,7 +1311,10 @@ export default function SafetyMark() {
 
   useEffect(() => {
     if (!safetyDebugMode) return;
-    const debugCoordinate = generateSeededJaenDebugLocation(user?._id);
+    const debugCoordinate = debugMarkers.find((marker) =>
+      isCurrentUserMarker(marker, user?._id)
+    )?.coordinate;
+    if (!debugCoordinate) return;
 
     mapRef.current?.animateToRegion(
       {
@@ -1325,7 +1324,7 @@ export default function SafetyMark() {
       },
       320
     );
-  }, [safetyDebugMode, user?._id]);
+  }, [debugMarkers, safetyDebugMode, user?._id]);
 
   const visibleMembersOnMap = useMemo(() => {
     const insideMembers = allPeople
@@ -1357,18 +1356,7 @@ export default function SafetyMark() {
             isCurrentUser: isCurrentUserMarker(marker, user?._id),
           }))
       );
-      const hasCurrentUser = serverMarkers.some(
-        (marker) => isCurrentUserMarker(marker, user?._id)
-      );
-
-      if (hasCurrentUser || !user?._id) {
-        return serverMarkers;
-      }
-
-      return dedupeMarkersByUserId([
-        buildCurrentUserDebugMarker(user, localSafetyStatus),
-        ...serverMarkers,
-      ].filter(Boolean));
+      return serverMarkers;
     }
 
     const userCoordinate = liveGpsLocation || normalizeCoordinate(user?.location);
@@ -1376,11 +1364,7 @@ export default function SafetyMark() {
       isSafetyLocationSharingEnabled &&
       userCoordinate &&
       isPointInsideJaen(userCoordinate.latitude, userCoordinate.longitude);
-    const currentUserFallbackCoordinate = user?._id
-      ? generateSeededJaenDebugLocation(user._id)
-      : null;
-
-    if ((shouldShowCurrentUser || currentUserFallbackCoordinate) && user?._id) {
+    if (shouldShowCurrentUser && user?._id) {
       const currentUserMarker = {
         id: user?._id || "me",
         username: user?.username || "You",
@@ -1388,11 +1372,11 @@ export default function SafetyMark() {
         safetyStatus: localSafetyStatus,
         safetyColor: getSafetyColor(localSafetyStatus),
         safetyLabel: getSafetyLabel(localSafetyStatus),
-        coordinate: shouldShowCurrentUser ? userCoordinate : currentUserFallbackCoordinate,
+        coordinate: userCoordinate,
         isCurrentUser: true,
-        insideJaen: Boolean(shouldShowCurrentUser || currentUserFallbackCoordinate),
-        debugMode: !shouldShowCurrentUser,
-        privateOnly: !shouldShowCurrentUser,
+        insideJaen: true,
+        debugMode: false,
+        privateOnly: false,
       };
 
       return [
@@ -1518,7 +1502,7 @@ export default function SafetyMark() {
   );
 
   const handleToggleDebugMode = async () => {
-    if (!user?._id || debugSyncing) return;
+    if (!SAFETY_DEBUG_FEATURE_ENABLED || !user?._id || debugSyncing) return;
 
     const nextValue = !safetyDebugMode;
     console.log("[debug-markers] toggle pressed:", {
@@ -1529,27 +1513,26 @@ export default function SafetyMark() {
 
     try {
       if (nextValue) {
-        const coordinate = generateSeededJaenDebugLocation(user._id);
-        const localMarker = buildCurrentUserDebugMarker(user, localSafetyStatus);
         setSafetyDebugMode(true);
-        if (localMarker) {
-          setDebugMarkers((items) =>
-            dedupeMarkersByUserId([
-              localMarker,
-              ...items.filter((item) => !isCurrentUserMarker(item, user._id)),
-            ])
-          );
+        const savedMarker = normalizeDebugMarker(
+          await syncOwnDebugLocation(localSafetyStatus),
+          user._id
+        );
+        if (savedMarker) {
+          setDebugMarkers((items) => dedupeMarkersByUserId([
+            savedMarker,
+            ...items.filter((item) => !isCurrentUserMarker(item, user._id)),
+          ]));
         }
-        await syncOwnDebugLocation(localSafetyStatus);
         await fetchDebugMarkers();
-        mapRef.current?.animateToRegion(
+        if (savedMarker?.coordinate) mapRef.current?.animateToRegion(
           {
-            ...coordinate,
+            ...savedMarker.coordinate,
             latitudeDelta: 0.025,
             longitudeDelta: 0.025,
           },
-          320
-        );
+            320
+          );
       } else {
         setSafetyDebugMode(false);
         await turnOffSafetyDebugLocation(user._id);
@@ -1967,7 +1950,7 @@ export default function SafetyMark() {
               </View>
             </View>
 
-            <Pressable
+            {SAFETY_DEBUG_FEATURE_ENABLED && <Pressable
               style={[
                 styles.debugCard,
                 themed.softCard,
@@ -1993,7 +1976,21 @@ export default function SafetyMark() {
                   ? "Debug Mode ON: synced demo markers are visible"
                   : "Debug Mode OFF: real location visibility is followed"}
               </Text>
-            </Pressable>
+            </Pressable>}
+
+            {!safetyDebugMode && isSafetyLocationSharingEnabled && liveLocationState === "outside" && (
+              <Text style={[styles.personMeta, themed.subtext]}>
+                Your location is outside Jaen and is not being shared.
+              </Text>
+            )}
+            {!safetyDebugMode && isSafetyLocationSharingEnabled && liveLocationState === "unavailable" && (
+              <Text style={[styles.personMeta, themed.subtext]}>Current location unavailable.</Text>
+            )}
+            {safetyDebugMode && (
+              <Text style={[styles.personMeta, themed.subtext]}>
+                Simulated location{isSafetyLocationSharingEnabled ? "" : " - Not shared"}
+              </Text>
+            )}
 
             <SafetyStatusToggle
               value={localSafetyStatus}
@@ -2086,9 +2083,11 @@ export default function SafetyMark() {
                             <Text style={[styles.personMeta, themed.subtext]}>
                               {!member.shareSafetyLocation
                                 ? "Location sharing disabled"
-                                : member.insideJaen || !member.location
+                                : member.insideJaen
                                 ? member.updatedLabel
-                                : "Outside the boundary of Jaen"}
+                                : member.location
+                                ? "Outside the boundary of Jaen"
+                                : "Current location unavailable"}
                             </Text>
                           </View>
                           <View style={styles.personAvatarWrap}>

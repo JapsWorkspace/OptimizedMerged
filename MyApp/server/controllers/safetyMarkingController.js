@@ -4,6 +4,9 @@ const ConnectionModel = require("../models/Connection");
 const mongoose = require("mongoose");
 const jaenGeoJSON = require("../../screens/data/jaen.json");
 
+const SAFETY_DEBUG_FEATURE_ENABLED =
+  String(process.env.ENABLE_SAFETY_DEBUG || "true").toLowerCase() !== "false";
+
 const JAEN_BOUNDS = {
   north: 15.42,
   south: 15.28,
@@ -169,9 +172,9 @@ async function getUniqueActiveDebugMarkers() {
     _id: { $in: validUserObjectIds },
     isArchived: { $ne: true },
   })
-    .select("_id")
+    .select("_id shareSafetyLocation")
     .lean();
-  const activeUserIds = new Set(activeUsers.map((user) => String(user._id)));
+  const activeUserMap = new Map(activeUsers.map((user) => [String(user._id), user]));
   const seen = new Set();
   const duplicateIds = [];
   const uniqueMarkers = [];
@@ -180,7 +183,7 @@ async function getUniqueActiveDebugMarkers() {
     const userId = normalizeMarkerUserId(marker);
     const isValidMarker =
       userId &&
-      activeUserIds.has(userId) &&
+      activeUserMap.has(userId) &&
       isInsideJaen(marker.latitude, marker.longitude);
 
     if (!isValidMarker) {
@@ -197,6 +200,7 @@ async function getUniqueActiveDebugMarkers() {
     uniqueMarkers.push({
       ...marker,
       userId,
+      shareSafetyLocation: activeUserMap.get(userId)?.shareSafetyLocation === true,
     });
   });
 
@@ -218,9 +222,13 @@ async function getUniqueActiveDebugMarkers() {
 
 exports.upsertDebugLocation = async (req, res) => {
   try {
+    if (!SAFETY_DEBUG_FEATURE_ENABLED) {
+      return res.status(403).json({ message: "Safety debug mode is disabled." });
+    }
+
     const userId = sanitizeText(req.body?.userId, 80);
-    let latitude = toNumber(req.body?.latitude);
-    let longitude = toNumber(req.body?.longitude);
+    let latitude = null;
+    let longitude = null;
 
     console.log("[debug-location] current user:", userId);
     console.log("[debug-location] POST received:", {
@@ -235,19 +243,29 @@ exports.upsertDebugLocation = async (req, res) => {
       return res.status(400).json({ message: "userId is required." });
     }
 
-    const user = await UserModel.findById(userId).select("_id");
+    const user = await UserModel.findOne({
+      _id: userId,
+      isArchived: { $ne: true },
+    }).select("_id shareSafetyLocation");
 
     if (!user) {
       return res.status(404).json({ message: "User not found." });
     }
 
-    let locationAdjusted = false;
+    const existingMarker = await SafetyDebugLocation.findOne({ userId }).lean();
+    const hasValidSavedLocation = isInsideJaen(
+      toNumber(existingMarker?.latitude),
+      toNumber(existingMarker?.longitude)
+    );
+    const locationAdjusted = !hasValidSavedLocation;
 
-    if (!isInsideJaen(latitude, longitude)) {
+    if (hasValidSavedLocation) {
+      latitude = Number(existingMarker.latitude);
+      longitude = Number(existingMarker.longitude);
+    } else {
       const fallback = generateSeededJaenDebugLocation(userId);
       latitude = fallback.latitude;
       longitude = fallback.longitude;
-      locationAdjusted = true;
     }
 
     if (locationAdjusted) {
@@ -294,6 +312,8 @@ exports.upsertDebugLocation = async (req, res) => {
     return res.status(200).json({
       message: "Debug location saved.",
       marker,
+      locationRestored: hasValidSavedLocation,
+      shareSafetyLocation: user.shareSafetyLocation === true,
     });
   } catch (err) {
     console.error("[safety-marking] upsert debug location failed:", err);
@@ -306,6 +326,7 @@ exports.upsertDebugLocation = async (req, res) => {
 
 exports.getDebugLocations = async (req, res) => {
   try {
+    if (!SAFETY_DEBUG_FEATURE_ENABLED) return res.status(200).json([]);
     const viewerUserId = sanitizeText(req.query?.userId, 80);
     if (!viewerUserId || !mongoose.isValidObjectId(viewerUserId)) {
       return res.status(400).json({ message: "A valid userId is required." });
@@ -324,9 +345,13 @@ exports.getDebugLocations = async (req, res) => {
       });
     });
 
-    const users = (await getUniqueActiveDebugMarkers()).filter((marker) =>
-      allowedUserIds.has(normalizeMarkerUserId(marker))
-    );
+    const users = (await getUniqueActiveDebugMarkers()).filter((marker) => {
+      const markerUserId = normalizeMarkerUserId(marker);
+      return (
+        allowedUserIds.has(markerUserId) &&
+        (marker.shareSafetyLocation === true || markerUserId === viewerUserId)
+      );
+    });
     const payload = users.map((marker) => ({
       userId: marker.userId,
       username: marker.username,
@@ -336,6 +361,9 @@ exports.getDebugLocations = async (req, res) => {
       longitude: marker.longitude,
       safetyStatus: marker.safetyStatus,
       debugMode: marker.debugMode,
+      shareSafetyLocation: marker.shareSafetyLocation === true,
+      privateOnly:
+        marker.userId === viewerUserId && marker.shareSafetyLocation !== true,
       updatedAt: marker.updatedAt,
     }));
 
@@ -371,7 +399,8 @@ exports.updateSafetyStatus = async (req, res) => {
       return res.status(400).json({ message: "userId is required." });
     }
 
-    const marker = await SafetyDebugLocation.findOneAndUpdate(
+    const marker = SAFETY_DEBUG_FEATURE_ENABLED
+      ? await SafetyDebugLocation.findOneAndUpdate(
       { userId },
       {
         $set: {
@@ -382,7 +411,8 @@ exports.updateSafetyStatus = async (req, res) => {
       {
         new: true,
       }
-    ).lean();
+    ).lean()
+      : null;
 
     if (mongoose.Types.ObjectId.isValid(userId)) {
       await UserModel.findByIdAndUpdate(userId, {

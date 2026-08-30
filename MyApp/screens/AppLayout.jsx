@@ -175,15 +175,9 @@ export default function AppLayout({
             }
 
             if (isSafetyMarkNotification(item)) {
-              setNotificationsOpen(false);
-              navigation.navigate("AppShell", {
-                screen: "SafetyMark",
-                params: {
-                  focusUserId: item?.actorUserId || null,
-                  notificationId: item?.id || null,
-                },
-              });
-              return true;
+              // Safety alerts open their detail panel first so the recipient
+              // can immediately read the sender's message and location.
+              return false;
             }
 
             if (!isJoinRequestNotification(item)) return false;
@@ -366,8 +360,6 @@ function NotificationFeed({
                 {!!item.actorName && (
                   <Text style={[styles.notificationMeta, { color: theme.mutedText }]}>
                     {safeDisplayText(item.actorName, "Requester")}
-                    {item.actorUsername ? ` â€¢ @${item.actorUsername}` : ""}
-                    {item.connectionCode ? ` â€¢ ${item.connectionCode}` : ""}
                   </Text>
                 )}
                 <View style={styles.notificationFooter}>
@@ -419,6 +411,30 @@ function NotificationDetailModal({ notification, visible, busy, theme, onClose, 
   }
 
   const showRequestActions = isJoinRequestNotification(notification);
+  const showSafetyLocation =
+    String(notification?.type || "").toLowerCase() === "safety_not_safe";
+  const locationLabel = safeDisplayText(notification?.metadata?.locationLabel, "");
+  const rawLatitude = notification?.metadata?.latitude;
+  const rawLongitude = notification?.metadata?.longitude;
+  const latitude = Number(rawLatitude);
+  const longitude = Number(rawLongitude);
+  const hasCoordinates =
+    rawLatitude !== null &&
+    rawLatitude !== undefined &&
+    rawLongitude !== null &&
+    rawLongitude !== undefined &&
+    notification?.metadata?.sharingEnabled === true &&
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude);
+  const locationState = String(notification?.metadata?.locationState || "");
+  const locationStateText =
+    locationState === "sharing_disabled"
+      ? "Location sharing disabled"
+      : locationState === "outside"
+        ? "Location is outside Jaen and is not being shared"
+        : locationState === "unavailable"
+          ? "Current location unavailable"
+          : locationLabel || (hasCoordinates ? "Current shared location" : "Location unavailable");
 
   return (
     <Modal transparent visible={visible} animationType="fade" onRequestClose={onClose}>
@@ -489,6 +505,25 @@ function NotificationDetailModal({ notification, visible, busy, theme, onClose, 
               <Text style={[styles.notificationDetailValue, { color: theme.text }]}>
                 {safeDisplayText(notification?.connectionCode, "Unavailable")}
               </Text>
+            </View>
+          )}
+
+          {showSafetyLocation && (
+            <View
+              style={[
+                styles.notificationDetailBlock,
+                { backgroundColor: theme.surfaceAlt, borderColor: theme.border },
+              ]}
+            >
+              <Text style={[styles.notificationDetailLabel, { color: theme.mutedText }]}>Location</Text>
+              <Text style={[styles.notificationDetailValue, { color: theme.text }]}>
+                {locationStateText}
+              </Text>
+              {hasCoordinates && (
+                <Text style={[styles.notificationDetailSubvalue, { color: theme.mutedText }]}>
+                  {latitude.toFixed(6)}, {longitude.toFixed(6)}
+                </Text>
+              )}
             </View>
           )}
 
