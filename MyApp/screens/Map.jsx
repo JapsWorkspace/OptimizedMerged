@@ -27,6 +27,7 @@ import {
   View,
 } from "react-native";
 import MapView, {
+  AnimatedRegion,
   Marker,
   Polygon,
   Polyline,
@@ -2082,6 +2083,14 @@ const {
   const [followMode, setFollowMode] = useState(false);
   const [currentHeading, setCurrentHeading] = useState(0);
   const [currentLocation, setCurrentLocation] = useState(USER_POS);
+  const navigationMarkerCoordinateRef = useRef(
+    new AnimatedRegion({
+      latitude: USER_POS.latitude,
+      longitude: USER_POS.longitude,
+      latitudeDelta: 0,
+      longitudeDelta: 0,
+    })
+  );
   const [nextRoutePoint, setNextRoutePoint] = useState(null);
   const [currentSpeedKmh, setCurrentSpeedKmh] = useState(0);
   const [routeHazardBanner, setRouteHazardBanner] = useState(null);
@@ -2115,7 +2124,7 @@ const {
   }, [enforceStartupCamera]);
   const routeStartCoordinate = useMemo(() => {
     const gpsCoordinate = toMarkerCoordinate(gpsLocation);
-    return evacGpsDebugMode && gpsCoordinate ? gpsCoordinate : USER_POS;
+    return evacGpsDebugMode ? USER_POS : gpsCoordinate || USER_POS;
   }, [evacGpsDebugMode, gpsLocation]);
 
   const requestedModuleParam = navRoute.params?.module;
@@ -2185,7 +2194,7 @@ const {
   }, []);
 
   useEffect(() => {
-    if (!isEvac || !evacGpsDebugMode || Platform.OS === "web") return undefined;
+    if (!isEvac || evacGpsDebugMode || Platform.OS === "web") return undefined;
 
     let mounted = true;
     let subscription = null;
@@ -2200,7 +2209,6 @@ const {
         if (!mounted) return;
 
         if (permission.status !== "granted") {
-          setEvacGpsDebugMode(false);
           setGpsLocation(null);
           Alert.alert(
             "GPS Location Needed",
@@ -2240,9 +2248,8 @@ const {
           }
         );
       } catch (err) {
-        console.log("Evac GPS debug failed:", err?.message);
+        console.log("Evac GPS location failed:", err?.message);
         if (mounted) {
-          setEvacGpsDebugMode(false);
           setGpsLocation(null);
           Alert.alert(
             "GPS Unavailable",
@@ -2513,7 +2520,11 @@ const {
   }, [isEvac, normalizedSelectedEvac, panelState, setPanelState]);
 
   const routing = useRouting({
-    enabled: isEvac && routeRequested && !!normalizedSelectedEvac,
+    enabled:
+      isEvac &&
+      routeRequested &&
+      !!normalizedSelectedEvac &&
+      (evacGpsDebugMode || Boolean(toMarkerCoordinate(gpsLocation))),
     from: [routeStartCoordinate.latitude, routeStartCoordinate.longitude],
     to: normalizedSelectedEvac
       ? {
@@ -2617,6 +2628,27 @@ const {
     updateNavigationCamera(true);
   }, [activeNavigationRoute, isEvac, isNavigating, updateNavigationCamera]);
 
+  useEffect(() => {
+    if (
+      !isEvac ||
+      !isNavigating ||
+      !isValidCoordinate(currentLocation?.latitude, currentLocation?.longitude)
+    ) {
+      return;
+    }
+
+    navigationMarkerCoordinateRef.current
+      .timing({
+        latitude: currentLocation.latitude,
+        longitude: currentLocation.longitude,
+        latitudeDelta: 0,
+        longitudeDelta: 0,
+        duration: 900,
+        useNativeDriver: false,
+      })
+      .start();
+  }, [currentLocation, isEvac, isNavigating]);
+
   const pauseFollowForManualPan = useCallback(() => {
     if (isEvac && routeRequested) {
       evacRouteManualCameraRef.current = true;
@@ -2669,6 +2701,15 @@ const {
     const cameraCenter = isValidCoordinate(origin?.latitude, origin?.longitude)
       ? origin
       : snappedLocation;
+
+    if (isValidCoordinate(cameraCenter?.latitude, cameraCenter?.longitude)) {
+      navigationMarkerCoordinateRef.current.setValue({
+        latitude: cameraCenter.latitude,
+        longitude: cameraCenter.longitude,
+        latitudeDelta: 0,
+        longitudeDelta: 0,
+      });
+    }
 
     lastNavigationCameraAtRef.current = Date.now();
     mapRef.current?.animateCamera(
@@ -3291,8 +3332,11 @@ const clearBarangayVisibilityFilter = useCallback(() => {
 }, [incidentDraft.latitude, incidentDraft.longitude]);
 
   const userCoordinate = useMemo(
-    () => toMarkerCoordinate(routeStartCoordinate),
-    [routeStartCoordinate]
+    () =>
+      !evacGpsDebugMode && !toMarkerCoordinate(gpsLocation)
+        ? null
+        : toMarkerCoordinate(routeStartCoordinate),
+    [evacGpsDebugMode, gpsLocation, routeStartCoordinate]
   );
   const selectedEvacCoordinate = useMemo(
     () => toMarkerCoordinate(normalizedSelectedEvac),
@@ -4548,15 +4592,17 @@ if (!incidentDebugMode && !currentLocationFeature) {
         )}
 
         {isEvac && isNavigating && userCoordinate && (
-          <SafeMarker
+          <Marker.Animated
             key="navigation-user-arrow"
-            coordinate={currentLocation || userCoordinate}
+            coordinate={navigationMarkerCoordinateRef.current}
             anchor={{ x: 0.5, y: 0.5 }}
             zIndex={1500}
-            tracksViewChanges
+            flat
+            rotation={currentHeading}
+            tracksViewChanges={false}
           >
-            <NavigationArrowMarker heading={currentHeading} />
-          </SafeMarker>
+            <NavigationArrowMarker heading={0} />
+          </Marker.Animated>
         )}
 
           </>
@@ -4709,6 +4755,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
           evacGpsDebugMode={evacGpsDebugMode}
           setEvacGpsDebugMode={setEvacGpsDebugMode}
           evacGpsLocating={evacGpsLocating}
+          evacGpsLocationAvailable={Boolean(toMarkerCoordinate(gpsLocation))}
           routeStartCoordinate={routeStartCoordinate}
           openQuickIncidentReport={openQuickIncidentReport}
           quickReportVisible={quickReportVisible}
@@ -4802,6 +4849,7 @@ function ModulePanel({
   evacGpsDebugMode,
   setEvacGpsDebugMode,
   evacGpsLocating,
+  evacGpsLocationAvailable,
   routeStartCoordinate,
   openQuickIncidentReport,
   quickReportVisible,
@@ -5169,6 +5217,15 @@ function ModulePanel({
 
   const requestRoutes = () => {
     if (!evac) return;
+    if (!evacGpsDebugMode && !evacGpsLocationAvailable) {
+      Alert.alert(
+        "Current Location Needed",
+        evacGpsLocating
+          ? "Your phone GPS location is still being detected. Please wait a moment."
+          : "Unable to determine your phone GPS location. Turn on location access or enable Debug Mode to use the fixed test location."
+      );
+      return;
+    }
     setIsNavigating(false);
     setFollowMode(false);
     setPanelState("ROUTE_SELECTION");
@@ -6288,19 +6345,15 @@ function ModulePanel({
               ]}
               disabled={evacGpsLocating}
               onPress={() => {
-                if (!evacGpsDebugMode && Platform.OS === "web") {
-                  Alert.alert(
-                    "GPS Unavailable",
-                    "Phone GPS is not available in this app view."
-                  );
-                  return;
-                }
-
-                setEvacGpsDebugMode((value) => !value);
+                setEvacGpsDebugMode((value) => {
+                  const nextValue = !value;
+                  if (!nextValue) setGpsLocation(null);
+                  return nextValue;
+                });
               }}
             >
               <Ionicons
-                name={evacGpsDebugMode ? "navigate" : "navigate-outline"}
+                name={evacGpsDebugMode ? "bug" : "navigate-outline"}
                 size={18}
                 color={evacGpsDebugMode ? "#FFFFFF" : theme.primary}
               />
@@ -6312,8 +6365,10 @@ function ModulePanel({
                 ]}
               >
                 {evacGpsDebugMode
-                  ? "GPS Debug ON: using actual phone location."
-                  : "GPS Debug OFF: using demo location for Evac Place."}
+                  ? "Debug Mode ON: using the fixed test location."
+                  : evacGpsLocating
+                    ? "Debug Mode OFF: finding your phone GPS location..."
+                    : "Debug Mode OFF: using your phone GPS location."}
               </Text>
             </TouchableOpacity>
 
