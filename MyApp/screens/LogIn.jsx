@@ -18,6 +18,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
 import MapView, { PROVIDER_GOOGLE } from "react-native-maps";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import api from "../lib/api";
 import { COLORS, createLoginStyles } from "../Designs/LogIn";
@@ -226,6 +227,10 @@ export default function LogIn({ navigation }) {
       if (!data.user?._id) {
         showLoginError("We could not complete sign-in. Please try again.", "both");
         return;
+      }
+
+      if (data.token) {
+        await AsyncStorage.setItem("token", data.token);
       }
 
       setUser({

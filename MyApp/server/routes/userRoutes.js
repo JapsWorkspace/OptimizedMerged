@@ -9,6 +9,7 @@ const userController = require("../controllers/userController");
 
 // ✅ MODEL
 const UserModel = require("../models/User");
+const { requireUserToken } = require("../utils/userAuthToken");
 
 /* =========================
    USER ROUTES
@@ -26,6 +27,9 @@ router.post("/forgot-password/reset-password", userController.forgotPasswordRese
 router.post("/forgot-password/skip-reset", userController.forgotPasswordSkipReset);
 router.get("/:id/verification-status", userController.getVerificationStatus);
 router.post("/:id/resend-verification-email", userController.resendVerificationEmail);
+router.get("/me/contact-verification", requireUserToken, userController.getAccountContactVerification);
+router.post("/me/contact-verification/send-otp", requireUserToken, userController.sendAccountContactOtp);
+router.post("/me/contact-verification/verify-otp", requireUserToken, userController.verifyAccountContactOtp);
 
 router.put("/archive/:id", userController.archiveUser);
 router.put("/restore/:id", userController.restoreUser);

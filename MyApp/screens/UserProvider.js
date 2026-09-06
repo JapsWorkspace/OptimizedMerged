@@ -82,6 +82,7 @@ export const UserProvider = ({ children }) => {
     } else {
       setUser(null);
       await AsyncStorage.removeItem("user");
+      await AsyncStorage.removeItem("token");
     }
   };
 

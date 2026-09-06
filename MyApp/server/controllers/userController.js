@@ -10,6 +10,7 @@ const sendEmailNotification = require("../utils/sendEmailNotification");
 const { sendUniSms } = require("../utils/sendUniSms");
 const cloudinary = require("../config/cloudinary");
 const bcrypt = require("bcryptjs");
+const { issueUserAuthToken } = require("../utils/userAuthToken");
 
 const GUIDELINE_NOTIFICATION_LOOKBACK_DAYS = 30;
 const ANNOUNCEMENT_NOTIFICATION_LOOKBACK_DAYS = 30;
@@ -266,6 +267,17 @@ function clearOtpFields(user, purpose) {
     user.emailOtp = "";
     user.emailOtpExpires = null;
   }
+}
+
+function getContactVerificationPayload(user) {
+  return {
+    email: user.email || "",
+    phoneNumber: user.phoneNumber || user.phone || "",
+    emailMasked: maskEmail(user.email),
+    phoneMasked: maskPhone(user.phoneNumber || user.phone),
+    isEmailVerified: user.isEmailVerified === true,
+    isPhoneVerified: user.isPhoneVerified === true,
+  };
 }
 
 async function deliverOtp(user, { channel, otp, purpose = "" }) {
@@ -1082,6 +1094,16 @@ const loginUser = async (req, res) => {
       user.deleteAfter = null;
     }
 
+    const existingPhoneUser = await UserModel.findOne({
+      $or: [{ phone: cleanPhone }, { phoneNumber: cleanPhone }],
+    });
+    if (existingPhoneUser) {
+      return res.status(400).json({
+        error: "PHONE_EXISTS",
+        message: "Mobile number already exists",
+      });
+    }
+
     if (user.twoFactorEnabled) {
       return res.json({
         twoFactor: true,
@@ -1103,6 +1125,7 @@ const loginUser = async (req, res) => {
     res.json({
       twoFactor: false,
       user: safeUser,
+      token: issueUserAuthToken(user._id),
       restored,
     });
   } catch (err) {
@@ -1168,6 +1191,11 @@ const updateUser = async (req, res) => {
       }
 
       updateData.email = cleanEmail;
+      if (cleanEmail !== normalizeEmail(existingUser.email)) {
+        updateData.isEmailVerified = false;
+        updateData.verificationToken = "";
+        updateData.verificationTokenExpires = null;
+      }
     }
 
     if (body.phone !== undefined || body.phoneNumber !== undefined) {
@@ -1180,8 +1208,21 @@ const updateUser = async (req, res) => {
         });
       }
 
+      if (cleanPhone) {
+        const phoneOwner = await UserModel.findOne({
+          _id: { $ne: userId },
+          $or: [{ phone: cleanPhone }, { phoneNumber: cleanPhone }],
+        });
+        if (phoneOwner) {
+          return res.status(400).json({ message: "Mobile number is already in use." });
+        }
+      }
+
       updateData.phone = cleanPhone;
       updateData.phoneNumber = cleanPhone;
+      if (cleanPhone !== sanitizePhone(existingUser.phoneNumber || existingUser.phone)) {
+        updateData.isPhoneVerified = false;
+      }
     }
 
     const district =
@@ -1523,6 +1564,14 @@ const verifyOtp = async (req, res) => {
         isPhoneVerified: user.isPhoneVerified === true,
         isEmailVerified: true,
         isVerified: true,
+        user: safeUserPayload(user),
+      };
+    } else if (purpose === "two_factor") {
+      clearOtpFields(user);
+      response = {
+        ...response,
+        message: "Sign-in verification successful.",
+        token: issueUserAuthToken(user._id),
         user: safeUserPayload(user),
       };
     } else if (isForgotPasswordPurpose(purpose)) {
@@ -1882,6 +1931,106 @@ const getVerificationStatus = async (req, res) => {
   } catch (err) {
     console.error("[verification status failed]", err);
     return res.status(500).json({ message: "Server error" });
+  }
+};
+
+const getAccountContactVerification = async (req, res) => {
+  try {
+    const user = await UserModel.findById(req.authUserId).select(
+      "email phone phoneNumber isEmailVerified isPhoneVerified"
+    );
+    if (!user) return res.status(404).json({ message: "User not found." });
+    return res.json(getContactVerificationPayload(user));
+  } catch (error) {
+    return res.status(500).json({ message: "Unable to load contact verification." });
+  }
+};
+
+const sendAccountContactOtp = async (req, res) => {
+  try {
+    const channel = String(req.body?.channel || "").toLowerCase();
+    if (!["sms", "email"].includes(channel)) {
+      return res.status(400).json({ message: "Verification channel must be sms or email." });
+    }
+
+    const user = await UserModel.findById(req.authUserId);
+    if (!user) return res.status(404).json({ message: "User not found." });
+    if (channel === "email" && !user.email) {
+      return res.status(400).json({ message: "This account has no email address." });
+    }
+    if (channel === "sms" && !(user.phoneNumber || user.phone)) {
+      return res.status(400).json({ message: "This account has no mobile number." });
+    }
+    if (channel === "email" && user.isEmailVerified === true) {
+      return res.status(409).json({ message: "Email address is already verified." });
+    }
+    if (channel === "sms" && user.isPhoneVerified === true) {
+      return res.status(409).json({ message: "Mobile number is already verified." });
+    }
+
+    const purpose = channel === "sms"
+      ? "account_phone_verification"
+      : "account_email_verification";
+    const { otp } = await setOtpFields(user, { purpose, channel });
+    await user.save();
+
+    try {
+      await deliverOtp(user, { channel, otp, purpose });
+    } catch (deliveryError) {
+      clearOtpFields(user, purpose);
+      user.lastOtpSentAt = null;
+      await user.save();
+      throw deliveryError;
+    }
+
+    return res.json({
+      message: channel === "sms" ? "Verification code sent to your mobile number." : "Verification code sent to your email address.",
+      channel,
+      destination: channel === "sms" ? maskPhone(user.phoneNumber || user.phone) : maskEmail(user.email),
+      expiresInSeconds: OTP_TTL_MS / 1000,
+      resendAfterSeconds: OTP_RESEND_COOLDOWN_MS / 1000,
+    });
+  } catch (error) {
+    return res.status(error.status || 500).json({
+      message: error.message || "Unable to send verification code.",
+    });
+  }
+};
+
+const verifyAccountContactOtp = async (req, res) => {
+  try {
+    const channel = String(req.body?.channel || "").toLowerCase();
+    const otp = String(req.body?.otp || "").trim();
+    if (!["sms", "email"].includes(channel)) {
+      return res.status(400).json({ message: "Verification channel must be sms or email." });
+    }
+    if (!/^\d{6}$/.test(otp)) {
+      return res.status(400).json({ message: "Please enter the full 6-digit code." });
+    }
+
+    const user = await UserModel.findById(req.authUserId);
+    if (!user) return res.status(404).json({ message: "User not found." });
+    const purpose = channel === "sms"
+      ? "account_phone_verification"
+      : "account_email_verification";
+
+    await verifyUserOtp(user, { otp, purpose, channel });
+    if (channel === "sms") user.isPhoneVerified = true;
+    else user.isEmailVerified = true;
+    clearOtpFields(user, purpose);
+    await user.save();
+
+    return res.json({
+      message: channel === "sms"
+        ? "Mobile number verified successfully."
+        : "Email address verified successfully.",
+      contactVerification: getContactVerificationPayload(user),
+      user: safeUserPayload(user),
+    });
+  } catch (error) {
+    return res.status(error.status || 500).json({
+      message: error.message || "Unable to verify the code.",
+    });
   }
 };
 
@@ -2378,6 +2527,9 @@ module.exports = {
   forgotPasswordResetPassword,
   forgotPasswordSkipReset,
   getVerificationStatus,
+  getAccountContactVerification,
+  sendAccountContactOtp,
+  verifyAccountContactOtp,
   resendVerificationEmail,
   sendOtp,
   verifyOtp,
