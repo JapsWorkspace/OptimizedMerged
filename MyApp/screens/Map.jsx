@@ -2691,6 +2691,10 @@ const {
     );
   }, [routeStartCoordinate]);
 
+  const resetToJaenOverview = useCallback(() => {
+    mapRef.current?.animateCamera(JAEN_STARTUP_CAMERA, { duration: 500 });
+  }, []);
+
   const startNavigationCamera = useCallback((route, origin = routeStartCoordinate) => {
     const coords = safeArray(route?.coords).filter((coord) =>
       isValidCoordinate(coord?.latitude, coord?.longitude)
@@ -3341,13 +3345,15 @@ const clearBarangayVisibilityFilter = useCallback(() => {
   };
 }, [incidentDraft.latitude, incidentDraft.longitude]);
 
+  // Keep one stable native marker mounted while switching from the simulated
+  // origin to real GPS. Unmounting and remounting it during the same map/state
+  // transition was crashing both Google Maps and Apple Maps renderers.
   const userCoordinate = useMemo(
-    () =>
-      !evacGpsDebugMode && !toMarkerCoordinate(gpsLocation)
-        ? null
-        : toMarkerCoordinate(routeStartCoordinate),
-    [evacGpsDebugMode, gpsLocation, routeStartCoordinate]
+    () => toMarkerCoordinate(routeStartCoordinate),
+    [routeStartCoordinate]
   );
+  const isEvacUserLocationVisible =
+    evacGpsDebugMode || Boolean(toMarkerCoordinate(gpsLocation));
   const selectedEvacCoordinate = useMemo(
     () => toMarkerCoordinate(normalizedSelectedEvac),
     [normalizedSelectedEvac]
@@ -4464,7 +4470,13 @@ if (!incidentDebugMode && !currentLocationFeature) {
         )}
 
         {isEvac && userCoordinate && !isNavigating && (
-          <SafeMarker key="evac-user" coordinate={userCoordinate} pinColor="#2563eb" />
+          <SafeMarker
+            key="evac-user"
+            coordinate={userCoordinate}
+            pinColor="#2563eb"
+            opacity={isEvacUserLocationVisible ? 1 : 0}
+            tracksViewChanges={false}
+          />
         )}
 
         {isEvac &&
@@ -4800,6 +4812,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
           recenterNavigationCamera={recenterNavigationCamera}
           startNavigationCamera={startNavigationCamera}
           resetNavigationCamera={resetNavigationCamera}
+          resetToJaenOverview={resetToJaenOverview}
           exitNavigationMode={exitNavigationMode}
           navigationTopSummary={navigationTopSummary}
           currentSpeedKmh={currentSpeedKmh}
@@ -4807,6 +4820,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
           setEvacGpsDebugMode={setEvacGpsDebugMode}
           evacGpsLocating={evacGpsLocating}
           evacGpsLocationAvailable={Boolean(toMarkerCoordinate(gpsLocation))}
+          setGpsLocation={setGpsLocation}
           routeStartCoordinate={routeStartCoordinate}
           openQuickIncidentReport={openQuickIncidentReport}
           quickReportVisible={quickReportVisible}
@@ -4896,6 +4910,7 @@ function ModulePanel({
   recenterNavigationCamera,
   startNavigationCamera,
   resetNavigationCamera,
+  resetToJaenOverview,
   exitNavigationMode,
   navigationTopSummary,
   currentSpeedKmh,
@@ -4903,6 +4918,7 @@ function ModulePanel({
   setEvacGpsDebugMode,
   evacGpsLocating,
   evacGpsLocationAvailable,
+  setGpsLocation,
   routeStartCoordinate,
   openQuickIncidentReport,
   quickReportVisible,
@@ -6444,7 +6460,10 @@ function ModulePanel({
                 if (panelState === "ROUTE_SELECTION") {
                   setPanelState("PLACE_INFO");
                 }
-                if (!nextValue) setGpsLocation(null);
+                if (!nextValue) {
+                  setGpsLocation(null);
+                  resetToJaenOverview();
+                }
                 console.log("[evac-route] location source changed", {
                   source: nextValue ? "debug" : "gps",
                 });

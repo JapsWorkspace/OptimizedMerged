@@ -17,7 +17,8 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.japsworkspace.sagipbayan",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSLocationWhenInUseUsageDescription": "SagipBayan uses your location to show your position and provide evacuation routes while you use the app."
       }
     },
     "android": {
@@ -40,6 +41,12 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow SagipBayan to use your location for map positioning and evacuation routing."
+        }
+      ],
       [
         "expo-notifications",
         {
