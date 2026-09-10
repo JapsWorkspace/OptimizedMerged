@@ -89,9 +89,13 @@ const NAV_ZOOM = 18.5;
 const NAV_PITCH = 55;
 const NAV_CAMERA_HEADING_OFFSET = 0;
 const NAV_CAMERA_THROTTLE_MS = 900;
-const OFF_ROUTE_DISTANCE_METERS = 35;
-const OFF_ROUTE_CONFIRMATION_COUNT = 3;
-const REROUTE_COOLDOWN_MS = 8000;
+const MIN_OFF_ROUTE_DISTANCE_METERS = 28;
+const MAX_OFF_ROUTE_DISTANCE_METERS = 50;
+const GOOD_GPS_ACCURACY_METERS = 25;
+const MOVING_SPEED_KMH = 3;
+const REROUTE_COOLDOWN_MS = 4000;
+const ROUTE_SNAP_MAX_DISTANCE_METERS = 25;
+const LARGE_PROGRESS_JUMP_METERS = 120;
 const MAX_NAVIGATION_GPS_ACCURACY_METERS = 65;
 const MAX_NAVIGATION_SPEED_METERS_PER_SECOND = 55;
 const MODULE_DISMISS_LOCK_MS = 180;
@@ -1126,6 +1130,18 @@ function projectLocationToRouteSegment(location, start, end) {
   };
 }
 
+function buildRouteCumulativeDistances(routeCoords) {
+  const coords = safeArray(routeCoords).filter((coord) =>
+    isValidCoordinate(coord?.latitude, coord?.longitude)
+  );
+  const distances = new Array(coords.length).fill(0);
+  for (let index = 1; index < coords.length; index += 1) {
+    distances[index] =
+      distances[index - 1] + (distanceMetersBetween(coords[index - 1], coords[index]) || 0);
+  }
+  return distances;
+}
+
 function getProjectedRouteProgress(routeCoords, location = USER_POS, options = {}) {
   const coords = safeArray(routeCoords).filter((coord) =>
     isValidCoordinate(coord?.latitude, coord?.longitude)
@@ -1157,6 +1173,11 @@ function getProjectedRouteProgress(routeCoords, location = USER_POS, options = {
 
   const segmentIndex = best?.segmentIndex ?? 0;
   const nextPoint = coords[Math.min(segmentIndex + 1, coords.length - 1)];
+  const cumulativeDistances = options.cumulativeDistances;
+  const segmentLength = distanceMetersBetween(coords[segmentIndex], nextPoint) || 0;
+  const cumulativeMeters = Array.isArray(cumulativeDistances)
+    ? (cumulativeDistances[segmentIndex] || 0) + segmentLength * (best?.fraction ?? 0)
+    : null;
   // Follow the tangent of the current road segment so the camera turns only
   // as the user enters that road, keeping the upcoming route toward the top.
   const headingPoint = nextPoint;
@@ -1167,6 +1188,7 @@ function getProjectedRouteProgress(routeCoords, location = USER_POS, options = {
     segmentIndex,
     fraction: best?.fraction ?? 0,
     distanceMeters: best?.distanceMeters ?? Infinity,
+    cumulativeMeters,
     heading: headingPoint ? getHeading(best?.projected || coords[segmentIndex], headingPoint) : 0,
   };
 }
@@ -1192,7 +1214,7 @@ function getUpcomingManeuver(routeCoords, location = USER_POS, previousIndex = n
   );
 
   if (coords.length < 3) {
-    return { instruction: "Continue straight", icon: "arrow-up", point: coords[1] || null };
+    return { instruction: "Continue straight", icon: "arrow-up", point: coords[1] || null, index: 1 };
   }
 
   const { index } = getProjectedRouteProgress(coords, location, { previousIndex });
@@ -1211,7 +1233,7 @@ function getUpcomingManeuver(routeCoords, location = USER_POS, previousIndex = n
     if (magnitude < 18) continue;
 
     if (magnitude >= 150) {
-      return { instruction: "Make a U-turn", icon: "return-down-back", point: atTurn };
+      return { instruction: "Make a U-turn", icon: "return-down-back", point: atTurn, index: turnIndex };
     }
 
     const direction = angle > 0 ? "right" : "left";
@@ -1220,6 +1242,7 @@ function getUpcomingManeuver(routeCoords, location = USER_POS, previousIndex = n
         instruction: `Make a sharp ${direction}`,
         icon: direction === "right" ? "arrow-forward" : "arrow-back",
         point: atTurn,
+        index: turnIndex,
       };
     }
 
@@ -1228,6 +1251,7 @@ function getUpcomingManeuver(routeCoords, location = USER_POS, previousIndex = n
         instruction: `Turn ${direction}`,
         icon: direction === "right" ? "return-up-forward" : "return-up-back",
         point: atTurn,
+        index: turnIndex,
       };
     }
 
@@ -1235,6 +1259,7 @@ function getUpcomingManeuver(routeCoords, location = USER_POS, previousIndex = n
       instruction: `Curve slightly ${direction}`,
       icon: direction === "right" ? "arrow-redo-outline" : "arrow-undo-outline",
       point: atTurn,
+      index: turnIndex,
     };
   }
 
@@ -1242,10 +1267,11 @@ function getUpcomingManeuver(routeCoords, location = USER_POS, previousIndex = n
     instruction: "Continue straight",
     icon: "arrow-up",
     point: coords[Math.min(index + 1, coords.length - 1)] || null,
+    index: Math.min(index + 1, coords.length - 1),
   };
 }
 
-function getNavigationRouteCoords(routeCoords, progressIndex = 0) {
+function getNavigationRouteCoords(routeCoords, progress = null) {
   const coords = safeArray(routeCoords).filter((coord) =>
     isValidCoordinate(coord?.latitude, coord?.longitude)
   );
@@ -1253,8 +1279,15 @@ function getNavigationRouteCoords(routeCoords, progressIndex = 0) {
 
   // Render routing-provider geometry only. Never connect the raw GPS position
   // to the route with an artificial straight segment across non-road areas.
-  const safeIndex = Math.max(0, Math.min(Number(progressIndex) || 0, coords.length - 2));
-  return coords.slice(safeIndex);
+  const safeIndex = Math.max(
+    0,
+    Math.min(Number(progress?.segmentIndex) || 0, coords.length - 2)
+  );
+  const projected = toMarkerCoordinate(progress?.projected);
+  if (!projected) return coords.slice(safeIndex);
+  // The projected point lies mathematically on the provider's current road
+  // segment, so trimming stays continuous without inventing a GPS connector.
+  return [projected, ...coords.slice(safeIndex + 1)];
 }
 
 function getNearestSnapPoint(value, snapPoints) {
@@ -2117,8 +2150,16 @@ const {
   const previousEvacGpsDebugModeRef = useRef(evacGpsDebugMode);
   const previousRouteOriginRef = useRef(USER_POS);
   const navigationProgressIndexRef = useRef(0);
-  const navigationProgressCandidateRef = useRef({ index: 0, count: 0 });
+  const navigationProgressRef = useRef({
+    segmentIndex: 0,
+    fraction: 0,
+    cumulativeMeters: 0,
+    projected: null,
+    distanceMeters: Infinity,
+  });
+  const navigationProgressCandidateRef = useRef({ cumulativeMeters: 0, count: 0 });
   const acceptedNavigationFixRef = useRef(null);
+  const lastProcessedNavigationFixRef = useRef("");
   const offRouteCountRef = useRef(0);
   const lastRerouteAtRef = useRef(0);
   const rerouteRequestIdRef = useRef(0);
@@ -2136,6 +2177,11 @@ const {
   const [currentHeading, setCurrentHeading] = useState(0);
   const [currentLocation, setCurrentLocation] = useState(USER_POS);
   const [navigationProgressIndex, setNavigationProgressIndex] = useState(0);
+  const [navigationRouteProgress, setNavigationRouteProgress] = useState(
+    navigationProgressRef.current
+  );
+  const [navigationLiveProjection, setNavigationLiveProjection] = useState(null);
+  const [navigationMarkerOnRoute, setNavigationMarkerOnRoute] = useState(true);
   const [navigationGpsAccuracy, setNavigationGpsAccuracy] = useState(null);
   const [navigationRoutingOrigin, setNavigationRoutingOrigin] = useState(null);
   const [rerouteRequestVersion, setRerouteRequestVersion] = useState(0);
@@ -2201,9 +2247,16 @@ const {
     setIsRerouting(false);
     smoothedNavigationHeadingRef.current = 0;
     offRouteCountRef.current = 0;
+    lastProcessedNavigationFixRef.current = "";
     navigationProgressIndexRef.current = 0;
-    navigationProgressCandidateRef.current = { index: 0, count: 0 };
+    navigationProgressRef.current = {
+      segmentIndex: 0, fraction: 0, cumulativeMeters: 0, projected: null, distanceMeters: Infinity,
+    };
+    navigationProgressCandidateRef.current = { cumulativeMeters: 0, count: 0 };
     setNavigationProgressIndex(0);
+    setNavigationRouteProgress(navigationProgressRef.current);
+    setNavigationLiveProjection(null);
+    setNavigationMarkerOnRoute(true);
   }, [isNavigating, routeStartCoordinate]);
 
   const requestedModuleParam = navRoute.params?.module;
@@ -2354,6 +2407,9 @@ const {
 
             acceptedNavigationFixRef.current = { coordinate: nextLocation, timestamp };
             setNavigationGpsAccuracy(Number.isFinite(accuracy) ? accuracy : null);
+            setCurrentSpeedKmh((previous) =>
+              smoothSpeed(previous, Number(position?.coords?.speed))
+            );
             setGpsLocation(nextLocation);
             setCurrentLocation(nextLocation);
           }
@@ -2660,14 +2716,25 @@ const {
         : "",
     [activeNavigationRoute]
   );
+  const activeRouteCumulativeDistances = useMemo(
+    () => buildRouteCumulativeDistances(activeNavigationRoute?.coords),
+    [activeNavigationRoute]
+  );
 
   useEffect(() => {
     routeHazardAlertedRef.current.clear();
     setRouteHazardBanner(null);
     navigationProgressIndexRef.current = 0;
-    navigationProgressCandidateRef.current = { index: 0, count: 0 };
+    navigationProgressRef.current = {
+      segmentIndex: 0, fraction: 0, cumulativeMeters: 0, projected: null, distanceMeters: Infinity,
+    };
+    navigationProgressCandidateRef.current = { cumulativeMeters: 0, count: 0 };
     setNavigationProgressIndex(0);
+    setNavigationRouteProgress(navigationProgressRef.current);
+    setNavigationLiveProjection(null);
+    setNavigationMarkerOnRoute(true);
     offRouteCountRef.current = 0;
+    lastProcessedNavigationFixRef.current = "";
   }, [activeNavigationRouteKey]);
 
   useEffect(() => {
@@ -2676,25 +2743,47 @@ const {
       return;
     }
 
+    const fixToken = [
+      activeNavigationRouteKey,
+      acceptedNavigationFixRef.current?.timestamp || "debug",
+      currentLocation?.latitude,
+      currentLocation?.longitude,
+    ].join(":");
+    if (lastProcessedNavigationFixRef.current === fixToken) return;
+    lastProcessedNavigationFixRef.current = fixToken;
+
     const progress = getProjectedRouteProgress(activeNavigationRoute.coords, currentLocation, {
       previousIndex: navigationProgressIndexRef.current,
+      cumulativeDistances: activeRouteCumulativeDistances,
     });
-    const previousIndex = navigationProgressIndexRef.current;
-    let nextIndex = Math.max(previousIndex, progress.segmentIndex);
-    if (nextIndex > previousIndex + 12) {
+    setNavigationLiveProjection(progress);
+    const previousProgress = navigationProgressRef.current;
+    const candidateMeters = Number(progress.cumulativeMeters) || 0;
+    const forwardDeltaMeters = candidateMeters - previousProgress.cumulativeMeters;
+    let acceptedProgress = progress;
+
+    if (forwardDeltaMeters < 0) {
+      acceptedProgress = previousProgress;
+    } else if (forwardDeltaMeters > LARGE_PROGRESS_JUMP_METERS) {
       const candidate = navigationProgressCandidateRef.current;
-      const matchesCandidate = Math.abs(candidate.index - nextIndex) <= 3;
+      const matchesCandidate = Math.abs(candidate.cumulativeMeters - candidateMeters) <= 60;
       const confirmationCount = matchesCandidate ? candidate.count + 1 : 1;
-      navigationProgressCandidateRef.current = { index: nextIndex, count: confirmationCount };
-      if (confirmationCount < 2) nextIndex = previousIndex;
+      navigationProgressCandidateRef.current = {
+        cumulativeMeters: candidateMeters,
+        count: confirmationCount,
+      };
+      if (confirmationCount < 2) acceptedProgress = previousProgress;
     } else {
-      navigationProgressCandidateRef.current = { index: nextIndex, count: 0 };
+      navigationProgressCandidateRef.current = { cumulativeMeters: candidateMeters, count: 0 };
     }
-    if (nextIndex !== previousIndex) {
-      navigationProgressIndexRef.current = nextIndex;
-      setNavigationProgressIndex(nextIndex);
+
+    if (acceptedProgress !== previousProgress) {
+      navigationProgressRef.current = acceptedProgress;
+      navigationProgressIndexRef.current = acceptedProgress.segmentIndex;
+      setNavigationProgressIndex(acceptedProgress.segmentIndex);
+      setNavigationRouteProgress(acceptedProgress);
     }
-    setNextRoutePoint(progress.nextPoint);
+    setNextRoutePoint(acceptedProgress.nextPoint || progress.nextPoint);
     const smoothedHeading = smoothlyInterpolateHeading(
       smoothedNavigationHeadingRef.current,
       progress.heading
@@ -2702,28 +2791,58 @@ const {
     smoothedNavigationHeadingRef.current = smoothedHeading;
     setCurrentHeading(smoothedHeading);
 
-    const reliableAccuracy =
-      evacGpsDebugMode ||
-      navigationGpsAccuracy == null ||
-      navigationGpsAccuracy <= MAX_NAVIGATION_GPS_ACCURACY_METERS;
-    const isOffRoute = reliableAccuracy && progress.distanceMeters > OFF_ROUTE_DISTANCE_METERS;
+    const numericAccuracy = Number(navigationGpsAccuracy);
+    const hasAccuracy = navigationGpsAccuracy != null && Number.isFinite(numericAccuracy);
+    const goodAccuracy = evacGpsDebugMode || (hasAccuracy && numericAccuracy <= GOOD_GPS_ACCURACY_METERS);
+    const reliableAccuracy = evacGpsDebugMode || !hasAccuracy || numericAccuracy <= MAX_NAVIGATION_GPS_ACCURACY_METERS;
+    const moving = Number(currentSpeedKmh) >= MOVING_SPEED_KMH;
+    const requiredConfirmations = goodAccuracy && moving ? 2 : 3;
+    const adaptiveOffRouteDistance = Math.min(
+      MAX_OFF_ROUTE_DISTANCE_METERS,
+      Math.max(MIN_OFF_ROUTE_DISTANCE_METERS, hasAccuracy ? numericAccuracy + 12 : 40)
+    );
+    const isOffRoute = reliableAccuracy && progress.distanceMeters > adaptiveOffRouteDistance;
     offRouteCountRef.current = isOffRoute ? offRouteCountRef.current + 1 : 0;
+    if (progress.distanceMeters <= ROUTE_SNAP_MAX_DISTANCE_METERS) {
+      setNavigationMarkerOnRoute(true);
+    } else if (offRouteCountRef.current >= requiredConfirmations) {
+      setNavigationMarkerOnRoute(false);
+    }
 
     if (__DEV__) {
       console.log("[navigation] route progress", {
-        gpsAccuracy: navigationGpsAccuracy == null ? null : Math.round(navigationGpsAccuracy),
+        gpsAccuracyCategory: evacGpsDebugMode
+          ? "debug"
+          : goodAccuracy
+            ? "good"
+            : reliableAccuracy
+              ? "weak"
+              : "rejected",
         distanceFromRoute: Math.round(progress.distanceMeters),
-        progressIndex: nextIndex,
+        requiredConfirmations,
         offRouteCount: offRouteCountRef.current,
+        segmentIndex: acceptedProgress.segmentIndex,
+        segmentFraction: Number((acceptedProgress.fraction || 0).toFixed(3)),
+        cumulativeProgressMeters: Math.round(acceptedProgress.cumulativeMeters || 0),
       });
     }
 
     const now = Date.now();
+    const elapsedSinceReroute = now - lastRerouteAtRef.current;
+    const cooldownActive = elapsedSinceReroute < REROUTE_COOLDOWN_MS;
+    const strongDeviation = progress.distanceMeters > adaptiveOffRouteDistance * 1.8;
+    const cooldownBlocksReroute =
+      cooldownActive && (!strongDeviation || elapsedSinceReroute < 2000);
     if (
-      offRouteCountRef.current < OFF_ROUTE_CONFIRMATION_COUNT ||
+      offRouteCountRef.current < requiredConfirmations ||
       isRerouting ||
-      now - lastRerouteAtRef.current < REROUTE_COOLDOWN_MS
+      cooldownBlocksReroute
     ) {
+      if (__DEV__ && isOffRoute && cooldownBlocksReroute) {
+        console.log("[navigation] rerouting waiting for cooldown", {
+          remainingMs: REROUTE_COOLDOWN_MS - (now - lastRerouteAtRef.current),
+        });
+      }
       return;
     }
 
@@ -2741,11 +2860,41 @@ const {
     }
   }, [
     activeNavigationRoute,
+    activeRouteCumulativeDistances,
     currentLocation,
+    currentSpeedKmh,
     evacGpsDebugMode,
     isNavigating,
     isRerouting,
     navigationGpsAccuracy,
+  ]);
+
+  const navigationDisplayCoordinate = useMemo(() => {
+    const rawCoordinate = toMarkerCoordinate(currentLocation);
+    const projectedCoordinate = toMarkerCoordinate(navigationLiveProjection?.snappedLocation);
+    const numericAccuracy = Number(navigationGpsAccuracy);
+    const hasAccuracy = navigationGpsAccuracy != null && Number.isFinite(numericAccuracy);
+    const snapThreshold = evacGpsDebugMode
+      ? ROUTE_SNAP_MAX_DISTANCE_METERS
+      : Math.min(
+          ROUTE_SNAP_MAX_DISTANCE_METERS,
+          Math.max(15, hasAccuracy ? numericAccuracy + 5 : 20)
+        );
+
+    if (
+      navigationMarkerOnRoute &&
+      projectedCoordinate &&
+      navigationLiveProjection?.distanceMeters <= snapThreshold
+    ) {
+      return projectedCoordinate;
+    }
+    return rawCoordinate;
+  }, [
+    currentLocation,
+    evacGpsDebugMode,
+    navigationGpsAccuracy,
+    navigationLiveProjection,
+    navigationMarkerOnRoute,
   ]);
 
   const updateNavigationCamera = useCallback(
@@ -2784,6 +2933,7 @@ const {
       );
       smoothedNavigationHeadingRef.current = heading;
       const now = Date.now();
+      const cameraCenter = navigationDisplayCoordinate || rawLocation;
 
       setCurrentLocation((previous) =>
         previous?.latitude === rawLocation.latitude &&
@@ -2801,7 +2951,7 @@ const {
       lastNavigationCameraAtRef.current = now;
       mapRef.current?.animateCamera(
         {
-          center: rawLocation,
+          center: cameraCenter,
           heading: getNavigationCameraHeading(heading),
           zoom: NAV_ZOOM,
           pitch: NAV_PITCH,
@@ -2816,6 +2966,7 @@ const {
       isBottomNavInteracting,
       isEvac,
       isNavigating,
+      navigationDisplayCoordinate,
       routeStartCoordinate,
     ]
   );
@@ -2833,22 +2984,22 @@ const {
     if (
       !isEvac ||
       !isNavigating ||
-      !isValidCoordinate(currentLocation?.latitude, currentLocation?.longitude)
+      !isValidCoordinate(navigationDisplayCoordinate?.latitude, navigationDisplayCoordinate?.longitude)
     ) {
       return;
     }
 
     navigationMarkerCoordinateRef.current
       .timing({
-        latitude: currentLocation.latitude,
-        longitude: currentLocation.longitude,
+        latitude: navigationDisplayCoordinate.latitude,
+        longitude: navigationDisplayCoordinate.longitude,
         latitudeDelta: 0,
         longitudeDelta: 0,
         duration: 900,
         useNativeDriver: false,
       })
       .start();
-  }, [currentLocation, isEvac, isNavigating]);
+  }, [isEvac, isNavigating, navigationDisplayCoordinate]);
 
   const pauseFollowForManualPan = useCallback(() => {
     if (isEvac && routeRequested) {
@@ -2950,8 +3101,14 @@ const {
     if (isRerouting) {
       setIsRerouting(false);
       navigationProgressIndexRef.current = 0;
-      navigationProgressCandidateRef.current = { index: 0, count: 0 };
+      navigationProgressRef.current = {
+        segmentIndex: 0, fraction: 0, cumulativeMeters: 0, projected: null, distanceMeters: Infinity,
+      };
+      navigationProgressCandidateRef.current = { cumulativeMeters: 0, count: 0 };
       setNavigationProgressIndex(0);
+      setNavigationRouteProgress(navigationProgressRef.current);
+      setNavigationLiveProjection(null);
+      setNavigationMarkerOnRoute(true);
       if (__DEV__) {
         console.log("[navigation] rerouting completed", {
           requestId: rerouteRequestVersion,
@@ -3078,55 +3235,6 @@ const {
     isNavigating,
     normalizedIncidents,
   ]);
-
-  useEffect(() => {
-    if (!isNavigating || !["driving", "cycling"].includes(travelMode)) {
-      setCurrentSpeedKmh(0);
-      return undefined;
-    }
-
-    let subscription = null;
-    let mounted = true;
-
-    async function watchGpsSpeed() {
-      if (Platform.OS === "web") {
-        setCurrentSpeedKmh(0);
-        return;
-      }
-
-      try {
-        const Location = await import("expo-location");
-        const permission = await Location.requestForegroundPermissionsAsync();
-
-        if (!mounted || permission.status !== "granted") {
-          setCurrentSpeedKmh(0);
-          return;
-        }
-
-        subscription = await Location.watchPositionAsync(
-          {
-            accuracy: Location.Accuracy.BestForNavigation,
-            timeInterval: 1200,
-            distanceInterval: 2,
-          },
-          (position) => {
-            const gpsSpeed = Number(position?.coords?.speed);
-            setCurrentSpeedKmh((previous) => smoothSpeed(previous, gpsSpeed));
-          }
-        );
-      } catch (err) {
-        console.log("GPS speed watch failed:", err?.message);
-        setCurrentSpeedKmh(0);
-      }
-    }
-
-    watchGpsSpeed();
-
-    return () => {
-      mounted = false;
-      subscription?.remove?.();
-    };
-  }, [isNavigating, travelMode]);
 
   const jaenBoundary = useMemo(
     () => renderBoundary(jaenGeoJSON, "jaen", "#065F46", 2.5, "transparent"),
@@ -3658,7 +3766,13 @@ const shouldShowIncidentMarkers =
       currentLocation,
       navigationProgressIndex
     );
-    const nextKm = distanceKm(currentLocation, maneuver.point || nextRoutePoint);
+    const maneuverProgressMeters = activeRouteCumulativeDistances[maneuver.index];
+    const alongRouteMeters = Number.isFinite(maneuverProgressMeters)
+      ? Math.max(0, maneuverProgressMeters - (navigationRouteProgress.cumulativeMeters || 0))
+      : null;
+    const nextKm = alongRouteMeters == null
+      ? distanceKm(currentLocation, maneuver.point || nextRoutePoint)
+      : alongRouteMeters / 1000;
     const distanceToNextTurn =
       nextKm == null
         ? "--"
@@ -3680,7 +3794,7 @@ const shouldShowIncidentMarkers =
         : "--",
       travelModeLabel: travelMode.charAt(0).toUpperCase() + travelMode.slice(1),
     };
-  }, [activeNavigationRoute, currentLocation, navigationProgressIndex, nextRoutePoint, normalizedSelectedEvac, travelMode]);
+  }, [activeNavigationRoute, activeRouteCumulativeDistances, currentLocation, navigationProgressIndex, navigationRouteProgress, nextRoutePoint, normalizedSelectedEvac, travelMode]);
 
   const exitNavigationMode = useCallback(() => {
     setIsNavigating(false);
@@ -4859,7 +4973,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
           routes.slice(0, 3).map((route, index) => {
             const coordinates =
               panelState === "NAVIGATION"
-                ? getNavigationRouteCoords(route.coords, navigationProgressIndex)
+                ? getNavigationRouteCoords(route.coords, navigationRouteProgress)
                 : safeArray(route.coords).filter((coordinate) =>
                     isValidCoordinate(coordinate?.latitude, coordinate?.longitude)
                   );

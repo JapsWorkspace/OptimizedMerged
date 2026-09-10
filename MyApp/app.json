@@ -4,7 +4,7 @@
     "slug": "SagipBayan",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/applogo-v7.png",
+    "icon": "./assets/applogo-v8.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
@@ -24,8 +24,8 @@
     "android": {
       "versionCode": 2,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/applogo-v7.png",
-        "backgroundColor": "#16855A"
+        "foregroundImage": "./assets/applogo-v8.png",
+        "backgroundColor": "#B2ED45"
       },
       "edgeToEdgeEnabled": true,
       "softwareKeyboardLayoutMode": "resize",

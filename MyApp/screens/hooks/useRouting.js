@@ -195,14 +195,14 @@ function findIntersectionWaypoint(route, incidents) {
         );
 
         if (dist > INCIDENT_RADIUS.critical * 1.2) {
-          console.log("✅ [Intersection Detour] Using", { lat, lng });
+          if (__DEV__) console.log("[evac-route] using an intersection safety detour");
           return { lat, lng };
         }
       }
     }
   }
 
-  console.log("❌ [Intersection Detour] None found");
+  if (__DEV__) console.log("[evac-route] no intersection safety detour found");
   return null;
 }
 
@@ -236,12 +236,12 @@ function pickLateralWaypoint(routeCoords, incidents) {
       Math.abs(p.longitude - base.longitude);
 
     if (lateral > LATERAL_THRESHOLD) {
-      console.log("✅ [Lateral Detour] Using", p);
+      if (__DEV__) console.log("[evac-route] using a lateral safety detour");
       return { lat: p.latitude, lng: p.longitude };
     }
   }
 
-  console.log("❌ [Lateral Detour] None found");
+  if (__DEV__) console.log("[evac-route] no lateral safety detour found");
   return null;
 }
 
@@ -307,7 +307,12 @@ export default function useRouting({
         ? `${fromLongitude},${fromLatitude};${wp.lng},${wp.lat};${toLongitude},${toLatitude}`
         : `${fromLongitude},${fromLatitude};${toLongitude},${toLatitude}`;
 
-      console.log("[OSRM]", wp ? "WITH WAYPOINT" : "DIRECT", coords);
+      if (__DEV__) {
+        console.log("[evac-route] requesting road route", {
+          profile,
+          includesSafetyWaypoint: Boolean(wp),
+        });
+      }
 
       return axios.get(
         `${OSRM_BASE}/route/v1/${profile}/${coords}`,
