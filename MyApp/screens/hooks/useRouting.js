@@ -19,6 +19,33 @@ const SPEED_KMH = {
   driving: 40,
 };
 
+const MAX_ROUTE_POINTS = 650;
+const MAX_ROUTE_ALTERNATIVES = 3;
+
+function isValidCoordinate(latitude, longitude) {
+  return Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude)) &&
+    Number(latitude) >= -90 && Number(latitude) <= 90 &&
+    Number(longitude) >= -180 && Number(longitude) <= 180;
+}
+
+function sanitizeRouteCoordinates(rawCoordinates) {
+  const points = (Array.isArray(rawCoordinates) ? rawCoordinates : [])
+    .map((coordinate) => {
+      const longitude = Number(coordinate?.[0]);
+      const latitude = Number(coordinate?.[1]);
+      return isValidCoordinate(latitude, longitude) ? { latitude, longitude } : null;
+    })
+    .filter(Boolean);
+
+  if (points.length <= MAX_ROUTE_POINTS) return points;
+  const sampled = [];
+  const lastIndex = points.length - 1;
+  for (let index = 0; index < MAX_ROUTE_POINTS; index += 1) {
+    sampled.push(points[Math.round((index * lastIndex) / (MAX_ROUTE_POINTS - 1))]);
+  }
+  return sampled;
+}
+
 function formatDuration(totalMinutes) {
   if (totalMinutes < 60) return `${totalMinutes} min`;
   const hours = Math.floor(totalMinutes / 60);
@@ -188,38 +215,44 @@ export default function useRouting({
   const lastKeyRef = useRef(null);
 
   /* ✅ TEMP DEBUG — FORCE CRITICAL INCIDENT AT ROUTE START */
-  const debugIncidents = [
-    ...incidents,
-    {
-      latitude: from?.[0],
-      longitude: from?.[1],
-      level: "critical",
-    },
-  ];
-
   useEffect(() => {
     lastKeyRef.current = null;
     inFlightRef.current = false;
   }, [mode, enabled]);
 
   useEffect(() => {
-    if (!enabled || !from || !to) return;
+    if (!enabled || !from || !to) return undefined;
+
+    const fromLatitude = Number(from?.[0]);
+    const fromLongitude = Number(from?.[1]);
+    const toLatitude = Number(to?.lat);
+    const toLongitude = Number(to?.lng);
+    if (!isValidCoordinate(fromLatitude, fromLongitude) || !isValidCoordinate(toLatitude, toLongitude)) {
+      setRoutes([]);
+      setError(new Error("A valid current location and destination are required."));
+      setLoading(false);
+      return undefined;
+    }
 
     const profile = OSRM_PROFILE_MAP[mode] || "driving";
-    const key = `${profile}:${from[0]},${from[1]}->${to.lat},${to.lng}`;
-    if (lastKeyRef.current === key) return;
+    const key = `${profile}:${fromLatitude},${fromLongitude}->${toLatitude},${toLongitude}`;
+    if (lastKeyRef.current === key) return undefined;
     lastKeyRef.current = key;
 
-    if (inFlightRef.current) return;
+    if (inFlightRef.current) return undefined;
     inFlightRef.current = true;
+    let cancelled = false;
+    const abortController = new AbortController();
 
     setLoading(true);
     setError(null);
+    setRoutes([]);
+    console.log("[evac-route] OSRM request started", { profile });
 
     const requestRoute = (wp) => {
       const coords = wp
-        ? `${from[1]},${from[0]};${wp.lng},${wp.lat};${to.lng},${to.lat}`
-        : `${from[1]},${from[0]};${to.lng},${to.lat}`;
+        ? `${fromLongitude},${fromLatitude};${wp.lng},${wp.lat};${toLongitude},${toLatitude}`
+        : `${fromLongitude},${fromLatitude};${toLongitude},${toLatitude}`;
 
       console.log("[OSRM]", wp ? "WITH WAYPOINT" : "DIRECT", coords);
 
@@ -232,6 +265,8 @@ export default function useRouting({
             steps: true,
             alternatives: true,
           },
+          timeout: 15000,
+          signal: abortController.signal,
         }
       );
     };
@@ -241,47 +276,52 @@ export default function useRouting({
         const route = res.data.routes?.[0];
         if (!route) return res;
 
-        let wp = findIntersectionWaypoint(route, debugIncidents);
+        let wp = findIntersectionWaypoint(route, incidents);
 
         if (!wp) {
-          const coords = route.geometry.coordinates.map(
-            ([lng, lat]) => ({
-              latitude: lat,
-              longitude: lng,
-            })
-          );
-          wp = pickLateralWaypoint(coords, debugIncidents);
+          const coords = sanitizeRouteCoordinates(route?.geometry?.coordinates);
+          wp = pickLateralWaypoint(coords, incidents);
         }
 
         return wp ? requestRoute(wp) : res;
       })
       .then((res) => {
-        const final = res.data.routes.map((r, i) => {
-          const coords = r.geometry.coordinates.map(
-            ([lng, lat]) => ({
-              latitude: lat,
-              longitude: lng,
-            })
-          );
+        if (cancelled) return;
+        const responseRoutes = Array.isArray(res?.data?.routes)
+          ? res.data.routes.slice(0, MAX_ROUTE_ALTERNATIVES)
+          : [];
+        console.log("[evac-route] OSRM response received", {
+          alternatives: responseRoutes.length,
+        });
+        const final = responseRoutes.map((r, i) => {
+          const coords = sanitizeRouteCoordinates(r?.geometry?.coordinates);
+          if (coords.length < 2) return null;
+          const distance = Number(r?.distance);
 
           return {
             id: `${key}-${i}`,
             coords,
-            distance: r.distance,
+            distance: Number.isFinite(distance) ? distance : 0,
             steps: r.legs?.[0]?.steps || [],
             summary: {
-              km: (r.distance / 1000).toFixed(1),
+              km: ((Number.isFinite(distance) ? distance : 0) / 1000).toFixed(1),
               minutes: Math.round(
-                (r.distance / 1000 / SPEED_KMH[mode]) * 60
+                ((Number.isFinite(distance) ? distance : 0) / 1000 / SPEED_KMH[mode]) * 60
               ),
               displayTime: formatDuration(
                 Math.round(
-                  (r.distance / 1000 / SPEED_KMH[mode]) * 60
+                  ((Number.isFinite(distance) ? distance : 0) / 1000 / SPEED_KMH[mode]) * 60
                 )
               ),
             },
-            ...analyzeRouteAgainstIncidents(coords, debugIncidents),
+            ...analyzeRouteAgainstIncidents(coords, incidents),
           };
+        }).filter(Boolean);
+
+        if (!final.length) throw new Error("No usable route was returned. Please try again.");
+        console.log("[evac-route] sanitized routes", {
+          routes: final.length,
+          firstRoutePoints: final[0]?.coords?.length || 0,
         });
 
         const safe = final.filter(
@@ -295,19 +335,33 @@ export default function useRouting({
         if (safe.length) recommendedId = safe[0].id;
         else if (risky.length) recommendedId = risky[0].id;
 
-        setRoutes(
+        if (!cancelled) setRoutes(
           final.map((r) => ({
             ...r,
             isRecommended: r.id === recommendedId,
           }))
         );
       })
-      .catch(setError)
+      .catch((requestError) => {
+        if (!cancelled && requestError?.code !== "ERR_CANCELED") {
+          console.warn("[evac-route] route request failed", requestError?.message);
+          setRoutes([]);
+          setError(requestError);
+        }
+      })
       .finally(() => {
-        inFlightRef.current = false;
-        setLoading(false);
+        if (!cancelled) {
+          inFlightRef.current = false;
+          setLoading(false);
+        }
       });
-  }, [enabled, from, to, mode, incidents]);
+
+    return () => {
+      cancelled = true;
+      abortController.abort();
+      inFlightRef.current = false;
+    };
+  }, [enabled, from?.[0], from?.[1], to?.lat, to?.lng, mode, incidents]);
 
   return { routes, loading, error };
 }

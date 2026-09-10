@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
+  Platform,
   ScrollView,
   StyleSheet,
   Switch,
@@ -12,6 +13,7 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import appConfig from "../app.json";
 
 import { ThemeContext } from "./contexts/ThemeContext";
 import { UserContext } from "./UserContext";
@@ -40,6 +42,10 @@ export default function Settings({ navigation }) {
     dangerNotificationSound: true,
     smsNotificationSound: true,
   });
+  const publicVersion = appConfig?.expo?.version || "1.0.0";
+  const platformBuild = Platform.OS === "ios"
+    ? appConfig?.expo?.ios?.buildNumber
+    : appConfig?.expo?.android?.versionCode;
 
   const shareSafetyLocation = user?.shareSafetyLocation === true;
   const privacyConsentKey = user?._id
@@ -254,6 +260,23 @@ export default function Settings({ navigation }) {
               <Text style={styles.helperText}>
                 Current display: {resolvedMode === "dark" ? "Dark" : "Light"}
               </Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>ABOUT</Text>
+          <View style={styles.groupCard}>
+            <View style={[styles.settingRow, styles.settingRowLast]}>
+              <View style={styles.settingIcon}>
+                <Ionicons name="information-circle-outline" size={18} color={theme.primary} />
+              </View>
+              <View style={styles.settingCopy}>
+                <Text style={styles.settingTitle}>SagipBayan</Text>
+                <Text style={styles.settingHelper}>
+                  Version {publicVersion} (Build {platformBuild || "-"})
+                </Text>
+              </View>
             </View>
           </View>
         </View>

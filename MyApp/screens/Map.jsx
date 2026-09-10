@@ -2079,6 +2079,7 @@ const {
   const startupCameraTimersRef = useRef([]);
   const incidentSubmitInFlightRef = useRef(false);
   const isModuleDismissTransitionRef = useRef(false);
+  const allowConfirmedNavigationExitRef = useRef(false);
   const [isNavigating, setIsNavigating] = useState(false);
   const [followMode, setFollowMode] = useState(false);
   const [currentHeading, setCurrentHeading] = useState(0);
@@ -2750,12 +2751,21 @@ const {
       evacRouteAutoFitKeyRef.current !== routeCameraKey
     ) {
       evacRouteAutoFitKeyRef.current = routeCameraKey;
-      mapRef.current?.fitToCoordinates(routing.routes[0].coords, {
-        edgePadding: EVAC_ROUTE_EDGE_PADDING,
-        animated: true,
-      });
+      const cameraCoordinates = safeArray(routing.routes[0]?.coords).filter((coordinate) =>
+        isValidCoordinate(coordinate?.latitude, coordinate?.longitude)
+      );
+      if (isBaseMapLoaded && cameraCoordinates.length >= 2) {
+        console.log("[evac-route] fitting camera", { coordinateCount: cameraCoordinates.length });
+        requestAnimationFrame(() => {
+          mapRef.current?.fitToCoordinates(cameraCoordinates, {
+            edgePadding: EVAC_ROUTE_EDGE_PADDING,
+            animated: true,
+          });
+        });
+      }
     }
   }, [
+    isBaseMapLoaded,
     normalizedSelectedEvac,
     panelState,
     routeRequested,
@@ -3467,7 +3477,39 @@ const shouldShowIncidentMarkers =
     setRoutes,
   ]);
 
+  useEffect(() => {
+    const unsubscribe = navigation.addListener("beforeRemove", (event) => {
+      if (!isNavigating || allowConfirmedNavigationExitRef.current) {
+        allowConfirmedNavigationExitRef.current = false;
+        return;
+      }
+
+      event.preventDefault();
+      Alert.alert("Stop navigation?", "Your active route will remain unless you stop navigation.", [
+        { text: "Continue Navigation", style: "cancel" },
+        {
+          text: "Stop Navigation",
+          style: "destructive",
+          onPress: () => {
+            allowConfirmedNavigationExitRef.current = true;
+            exitNavigationMode();
+            requestAnimationFrame(() => navigation.dispatch(event.data.action));
+          },
+        },
+      ]);
+    });
+
+    return unsubscribe;
+  }, [exitNavigationMode, isNavigating, navigation]);
+
   const handleBack = useCallback(() => {
+    if (isNavigating) {
+      Alert.alert("Stop navigation?", "Your active route will remain unless you stop navigation.", [
+        { text: "Continue Navigation", style: "cancel" },
+        { text: "Stop Navigation", style: "destructive", onPress: exitNavigationMode },
+      ]);
+      return;
+    }
     navigation.setParams({
       module: undefined,
       evacPlace: undefined,
@@ -3498,6 +3540,8 @@ const shouldShowIncidentMarkers =
     }
     mapRef.current?.animateToRegion(JAEN_INITIAL_REGION, 260);
   }, [
+    exitNavigationMode,
+    isNavigating,
     navigation,
     setActiveMapModule,
     setActiveRoute,
@@ -4433,7 +4477,10 @@ if (!incidentDebugMode && !currentLocationFeature) {
               normalizedSelectedEvac?._id && normalizedSelectedEvac._id === place._id
             );
 
-            if (routeRequested) return null;
+            // Keep the selected marker mounted while route selection begins.
+            // Removing every marker and inserting a different complex marker
+            // in the same frame was unstable on the native iOS map.
+            if (routeRequested && !isSelected) return null;
 
             return (
               <SafeMarker
@@ -4557,13 +4604,15 @@ if (!incidentDebugMode && !currentLocationFeature) {
         )}
 
         {isEvac &&
-          routes.map((route, index) => {
+          routes.slice(0, 3).map((route, index) => {
             const coordinates =
               panelState === "NAVIGATION"
                 ? getNavigationRouteCoords(route.coords, currentLocation)
-                : safeArray(route.coords);
+                : safeArray(route.coords).filter((coordinate) =>
+                    isValidCoordinate(coordinate?.latitude, coordinate?.longitude)
+                  );
 
-            return panelState === "NAVIGATION" && !route.isRecommended ? null : (
+            return coordinates.length < 2 || (panelState === "NAVIGATION" && !route.isRecommended) ? null : (
               <Polyline
                 key={route.id ?? index}
                 coordinates={coordinates}
@@ -4574,13 +4623,13 @@ if (!incidentDebugMode && !currentLocationFeature) {
             );
           })}
 
-        {isEvac && (routeRequested || isNavigating) && routeDestinationCoordinate && (
-          <Marker
+        {Platform.OS !== "ios" && isEvac && (routeRequested || isNavigating) && routeDestinationCoordinate && (
+          <SafeMarker
             key="evac-route-destination"
             coordinate={routeDestinationCoordinate}
             anchor={{ x: 0.5, y: 0.96 }}
             zIndex={1450}
-            tracksViewChanges={true}
+            tracksViewChanges={false}
             title="Route destination"
             description={safeDisplayText(
               normalizedSelectedEvac?.name,
@@ -4588,7 +4637,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
             )}
           >
             <RouteDestinationMarker />
-          </Marker>
+          </SafeMarker>
         )}
 
         {isEvac && isNavigating && userCoordinate && (
@@ -4731,6 +4780,8 @@ if (!incidentDebugMode && !currentLocationFeature) {
           setRouteRequested={setRouteRequested}
           routes={routes}
           setRoutes={setRoutes}
+          routingLoading={routing.loading}
+          routingError={routing.error}
           activeRoute={activeNavigationRoute}
           setActiveRoute={setActiveRoute}
           travelMode={travelMode}
@@ -4825,6 +4876,8 @@ function ModulePanel({
   setRouteRequested,
   routes,
   setRoutes,
+  routingLoading,
+  routingError,
   activeRoute,
   setActiveRoute,
   travelMode,
@@ -4898,6 +4951,7 @@ function ModulePanel({
   const fieldFocusTimerRef = useRef(null);
   const formScrollMountedRef = useRef(true);
   const incidentFocusedFieldRef = useRef(null);
+  const findRoutePressInFlightRef = useRef(false);
 
   useEffect(() => {
     activeModuleRef.current = activeModule;
@@ -5064,12 +5118,15 @@ function ModulePanel({
     const nextY = Math.max(PANEL_MIN_OFFSET, Math.min(currentPanelMaxOffset, panelY));
     translateY.setValue(nextY);
     lastY.current = nextY;
-    const hidden = nextY >= currentPanelMaxOffset;
+    const hidden =
+      !(activeModule === "evac" && isNavigating) && nextY >= currentPanelMaxOffset;
     setIsPanelHidden(hidden);
     setIsMapPanelOpen(!hidden);
   }, [
+    activeModule,
     currentPanelDefaultOffset,
     currentPanelMaxOffset,
+    isNavigating,
     panelY,
     setIsMapPanelOpen,
     translateY,
@@ -5155,8 +5212,16 @@ function ModulePanel({
         );
         const projectedY = rawFinalY + Math.max(-44, Math.min(44, gesture.vy * 18));
         const finalY = getNearestSnapPoint(projectedY, panelSnapPointsRef.current);
-        const willHide = finalY >= panelMaxOffsetRef.current;
-        const settledY = willHide ? PANEL_MAX_OFFSET : finalY;
+        // Navigation's lowest snap point is a collapsed/peek state, not a
+        // dismissal. Treating it as PANEL_MAX_OFFSET used to fire the generic
+        // dismissal cleanup and silently cancel the active route.
+        const navigationPanelActive = isNavigationPanelActiveRef.current;
+        const willHide = !navigationPanelActive && finalY >= panelMaxOffsetRef.current;
+        const settledY = navigationPanelActive
+          ? Math.min(finalY, NAV_PANEL_COLLAPSED_OFFSET)
+          : willHide
+            ? PANEL_MAX_OFFSET
+            : finalY;
         const dismissedModule = willHide ? activeModuleRef.current : null;
 
         lastY.current = settledY;
@@ -5198,7 +5263,9 @@ function ModulePanel({
           lastNavigationPanelY.current = lastY.current;
         }
         setPanelY(lastY.current);
-        const hidden = lastY.current >= panelMaxOffsetRef.current;
+        const hidden =
+          !isNavigationPanelActiveRef.current &&
+          lastY.current >= panelMaxOffsetRef.current;
         setIsPanelHidden(hidden);
         setIsMapPanelOpen(!hidden);
       },
@@ -5216,7 +5283,15 @@ function ModulePanel({
   };
 
   const requestRoutes = () => {
-    if (!evac) return;
+    if (findRoutePressInFlightRef.current || routingLoading) return;
+    const destination = toMarkerCoordinate(evac);
+    const origin = toMarkerCoordinate(routeStartCoordinate);
+    console.log("[evac-route] Find Route pressed");
+    if (!destination || !origin) {
+      console.warn("[evac-route] invalid origin or destination");
+      Alert.alert("Route Unavailable", "The selected evacuation center does not have valid route coordinates.");
+      return;
+    }
     if (!evacGpsDebugMode && !evacGpsLocationAvailable) {
       Alert.alert(
         "Current Location Needed",
@@ -5226,14 +5301,27 @@ function ModulePanel({
       );
       return;
     }
+    findRoutePressInFlightRef.current = true;
+    console.log("[evac-route] validated route endpoints; request starting");
     setIsNavigating(false);
     setFollowMode(false);
+    setRoutes([]);
+    setActiveRoute(null);
     setPanelState("ROUTE_SELECTION");
     setPanelY(300);
     lastY.current = 300;
     translateY.setValue(300);
-    setRouteRequested(true);
+    if (routingError) {
+      setRouteRequested(false);
+      requestAnimationFrame(() => setRouteRequested(true));
+    } else {
+      setRouteRequested(true);
+    }
   };
+
+  useEffect(() => {
+    if (!routingLoading) findRoutePressInFlightRef.current = false;
+  }, [routingLoading, routingError, routes.length]);
 
   const changeMode = (mode) => {
     setTravelMode(mode);
@@ -6597,6 +6685,7 @@ function ModulePanel({
                     <TouchableOpacity
                       style={[styles.primaryBtn, styles.evacRouteAction]}
                       onPress={requestRoutes}
+                      disabled={routingLoading}
                       activeOpacity={0.7}
                       delayPressIn={0}
                       hitSlop={{ top: 8, right: 8, bottom: 10, left: 5 }}
@@ -6604,7 +6693,11 @@ function ModulePanel({
                       accessibilityRole="button"
                       accessibilityLabel="Find route"
                     >
-                      <Text style={styles.primaryText}>Find route</Text>
+                      {routingLoading ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <Text style={styles.primaryText}>Find route</Text>
+                      )}
                     </TouchableOpacity>
                   </View>
                 )}
@@ -6634,8 +6727,18 @@ function ModulePanel({
                       })}
                     </View>
 
-                    {routes.length === 0 ? (
+                    {routingError && !routingLoading ? (
                       <View style={[styles.loadingCard, themedOverlay.card]}>
+                        <Text style={[styles.panelNote, themedOverlay.subtext]}>
+                          Unable to find a route. Check your connection and try again.
+                        </Text>
+                        <TouchableOpacity style={styles.primaryBtn} onPress={requestRoutes}>
+                          <Text style={styles.primaryText}>Retry</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : routes.length === 0 ? (
+                      <View style={[styles.loadingCard, themedOverlay.card]}>
+                        <ActivityIndicator size="small" color={theme.primary} />
                         <Text style={[styles.panelNote, themedOverlay.subtext]}>Finding available routes...</Text>
                       </View>
                     ) : (

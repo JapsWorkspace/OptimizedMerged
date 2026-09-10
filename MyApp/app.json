@@ -4,7 +4,7 @@
     "slug": "SagipBayan",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/applogo-v3.png",
+    "icon": "./assets/applogo-v6.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
@@ -13,6 +13,7 @@
       "backgroundColor": "#047857"
     },
     "ios": {
+      "buildNumber": "8",
       "supportsTablet": true,
       "bundleIdentifier": "com.japsworkspace.sagipbayan",
       "infoPlist": {
@@ -20,9 +21,10 @@
       }
     },
     "android": {
+      "versionCode": 2,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/applogo-v3.png",
-        "backgroundColor": "#063D2B"
+        "foregroundImage": "./assets/applogo-v6.png",
+        "backgroundColor": "#0B6B48"
       },
       "edgeToEdgeEnabled": true,
       "softwareKeyboardLayoutMode": "resize",
