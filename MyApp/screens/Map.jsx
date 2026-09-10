@@ -89,6 +89,11 @@ const NAV_ZOOM = 18.5;
 const NAV_PITCH = 55;
 const NAV_CAMERA_HEADING_OFFSET = 0;
 const NAV_CAMERA_THROTTLE_MS = 900;
+const OFF_ROUTE_DISTANCE_METERS = 35;
+const OFF_ROUTE_CONFIRMATION_COUNT = 3;
+const REROUTE_COOLDOWN_MS = 8000;
+const MAX_NAVIGATION_GPS_ACCURACY_METERS = 65;
+const MAX_NAVIGATION_SPEED_METERS_PER_SECOND = 55;
 const MODULE_DISMISS_LOCK_MS = 180;
 
 const JAEN_INITIAL_REGION = {
@@ -1097,55 +1102,91 @@ function distance(a, b) {
   return dx * dx + dy * dy;
 }
 
-function getNearestRouteProgress(routeCoords, location = USER_POS) {
+function projectLocationToRouteSegment(location, start, end) {
+  if (!location || !start || !end) return null;
+  const latitudeScale = 111320;
+  const longitudeScale = latitudeScale * Math.cos((Number(location.latitude) * Math.PI) / 180);
+  const bx = (Number(end.longitude) - Number(start.longitude)) * longitudeScale;
+  const by = (Number(end.latitude) - Number(start.latitude)) * latitudeScale;
+  const px = (Number(location.longitude) - Number(start.longitude)) * longitudeScale;
+  const py = (Number(location.latitude) - Number(start.latitude)) * latitudeScale;
+  const lengthSquared = bx * bx + by * by;
+  const fraction = lengthSquared > 0
+    ? Math.max(0, Math.min(1, (px * bx + py * by) / lengthSquared))
+    : 0;
+  const projected = {
+    latitude: Number(start.latitude) + (Number(end.latitude) - Number(start.latitude)) * fraction,
+    longitude: Number(start.longitude) + (Number(end.longitude) - Number(start.longitude)) * fraction,
+  };
+
+  return {
+    projected,
+    fraction,
+    distanceMeters: distanceMetersBetween(location, projected) ?? Infinity,
+  };
+}
+
+function getProjectedRouteProgress(routeCoords, location = USER_POS, options = {}) {
   const coords = safeArray(routeCoords).filter((coord) =>
     isValidCoordinate(coord?.latitude, coord?.longitude)
   );
-
-  if (!coords.length) {
+  if (coords.length < 2) {
     return {
-      snappedLocation: location,
-      nextPoint: null,
+      snappedLocation: coords[0] || location,
+      nextPoint: coords[0] || null,
       index: 0,
+      segmentIndex: 0,
+      fraction: 0,
+      distanceMeters: Infinity,
       heading: 0,
     };
   }
 
-  let nearestIdx = 0;
-  let minDist = Infinity;
+  const previousIndex = Number.isFinite(options.previousIndex) ? options.previousIndex : null;
+  const startIndex = previousIndex == null ? 0 : Math.max(0, previousIndex - 2);
+  const endIndex = previousIndex == null
+    ? coords.length - 2
+    : Math.min(coords.length - 2, previousIndex + 160);
+  let best = null;
 
-  coords.forEach((coord, index) => {
-    const currentDistance = distance(location, coord);
-    if (currentDistance < minDist) {
-      minDist = currentDistance;
-      nearestIdx = index;
-    }
-  });
+  for (let index = startIndex; index <= endIndex; index += 1) {
+    const projection = projectLocationToRouteSegment(location, coords[index], coords[index + 1]);
+    if (!projection || (best && projection.distanceMeters >= best.distanceMeters)) continue;
+    best = { ...projection, segmentIndex: index };
+  }
 
-  const snappedLocation = coords[nearestIdx] || location;
-  const nextPoint =
-    coords[Math.min(nearestIdx + 1, coords.length - 1)] ||
-    coords[Math.max(nearestIdx - 1, 0)] ||
-    snappedLocation;
-  const headingPoint =
-    coords[Math.min(nearestIdx + 8, coords.length - 1)] || nextPoint;
-
+  const segmentIndex = best?.segmentIndex ?? 0;
+  const nextPoint = coords[Math.min(segmentIndex + 1, coords.length - 1)];
+  // Follow the tangent of the current road segment so the camera turns only
+  // as the user enters that road, keeping the upcoming route toward the top.
+  const headingPoint = nextPoint;
   return {
-    snappedLocation,
+    snappedLocation: best?.projected || coords[segmentIndex],
     nextPoint,
-    index: nearestIdx,
-    heading:
-      headingPoint && headingPoint !== snappedLocation
-        ? getHeading(snappedLocation, headingPoint)
-        : 0,
+    index: segmentIndex,
+    segmentIndex,
+    fraction: best?.fraction ?? 0,
+    distanceMeters: best?.distanceMeters ?? Infinity,
+    heading: headingPoint ? getHeading(best?.projected || coords[segmentIndex], headingPoint) : 0,
   };
+}
+
+function getNearestRouteProgress(routeCoords, location = USER_POS) {
+  return getProjectedRouteProgress(routeCoords, location);
 }
 
 function normalizeTurnAngle(value) {
   return ((Number(value || 0) + 540) % 360) - 180;
 }
 
-function getUpcomingManeuver(routeCoords, location = USER_POS) {
+function smoothlyInterpolateHeading(previousHeading, nextHeading, factor = 0.32) {
+  const previous = Number.isFinite(Number(previousHeading)) ? Number(previousHeading) : 0;
+  const next = Number.isFinite(Number(nextHeading)) ? Number(nextHeading) : previous;
+  const shortestTurn = normalizeTurnAngle(next - previous);
+  return ((previous + shortestTurn * factor) % 360 + 360) % 360;
+}
+
+function getUpcomingManeuver(routeCoords, location = USER_POS, previousIndex = null) {
   const coords = safeArray(routeCoords).filter((coord) =>
     isValidCoordinate(coord?.latitude, coord?.longitude)
   );
@@ -1154,7 +1195,7 @@ function getUpcomingManeuver(routeCoords, location = USER_POS) {
     return { instruction: "Continue straight", icon: "arrow-up", point: coords[1] || null };
   }
 
-  const { index } = getNearestRouteProgress(coords, location);
+  const { index } = getProjectedRouteProgress(coords, location, { previousIndex });
   const searchEnd = Math.min(coords.length - 2, index + 24);
 
   for (let turnIndex = index + 2; turnIndex <= searchEnd; turnIndex += 1) {
@@ -1204,14 +1245,16 @@ function getUpcomingManeuver(routeCoords, location = USER_POS) {
   };
 }
 
-function getNavigationRouteCoords(routeCoords, location = USER_POS) {
+function getNavigationRouteCoords(routeCoords, progressIndex = 0) {
   const coords = safeArray(routeCoords).filter((coord) =>
     isValidCoordinate(coord?.latitude, coord?.longitude)
   );
   if (coords.length < 2) return coords;
 
-  const { snappedLocation, index } = getNearestRouteProgress(coords, location);
-  return [snappedLocation, ...coords.slice(Math.min(index + 1, coords.length - 1))];
+  // Render routing-provider geometry only. Never connect the raw GPS position
+  // to the route with an artificial straight segment across non-road areas.
+  const safeIndex = Math.max(0, Math.min(Number(progressIndex) || 0, coords.length - 2));
+  return coords.slice(safeIndex);
 }
 
 function getNearestSnapPoint(value, snapPoints) {
@@ -2066,12 +2109,19 @@ const {
   const isClampingRegionRef = useRef(false);
   const recentModuleChangeRef = useRef(Date.now());
   const lastNavigationCameraAtRef = useRef(0);
+  const smoothedNavigationHeadingRef = useRef(0);
   const recenterTimerRef = useRef(null);
   const evacSelectionRecenterTimerRef = useRef(null);
   const routeHazardAlertedRef = useRef(new Set());
   const clusterNotificationInFlightRef = useRef(new Set());
   const previousEvacGpsDebugModeRef = useRef(evacGpsDebugMode);
   const previousRouteOriginRef = useRef(USER_POS);
+  const navigationProgressIndexRef = useRef(0);
+  const navigationProgressCandidateRef = useRef({ index: 0, count: 0 });
+  const acceptedNavigationFixRef = useRef(null);
+  const offRouteCountRef = useRef(0);
+  const lastRerouteAtRef = useRef(0);
+  const rerouteRequestIdRef = useRef(0);
   const evacRouteManualCameraRef = useRef(false);
   const evacRouteAutoFitKeyRef = useRef("");
   const moduleDismissCameraTimerRef = useRef(null);
@@ -2085,6 +2135,11 @@ const {
   const [followMode, setFollowMode] = useState(false);
   const [currentHeading, setCurrentHeading] = useState(0);
   const [currentLocation, setCurrentLocation] = useState(USER_POS);
+  const [navigationProgressIndex, setNavigationProgressIndex] = useState(0);
+  const [navigationGpsAccuracy, setNavigationGpsAccuracy] = useState(null);
+  const [navigationRoutingOrigin, setNavigationRoutingOrigin] = useState(null);
+  const [rerouteRequestVersion, setRerouteRequestVersion] = useState(0);
+  const [isRerouting, setIsRerouting] = useState(false);
   const navigationMarkerCoordinateRef = useRef(
     new AnimatedRegion({
       latitude: USER_POS.latitude,
@@ -2135,6 +2190,21 @@ const {
     const gpsCoordinate = toMarkerCoordinate(gpsLocation);
     return evacGpsDebugMode ? USER_POS : gpsCoordinate || USER_POS;
   }, [evacGpsDebugMode, gpsLocation]);
+
+  useEffect(() => {
+    if (isNavigating) {
+      setNavigationRoutingOrigin((previous) => previous || routeStartCoordinate);
+      return;
+    }
+
+    setNavigationRoutingOrigin(null);
+    setIsRerouting(false);
+    smoothedNavigationHeadingRef.current = 0;
+    offRouteCountRef.current = 0;
+    navigationProgressIndexRef.current = 0;
+    navigationProgressCandidateRef.current = { index: 0, count: 0 };
+    setNavigationProgressIndex(0);
+  }, [isNavigating, routeStartCoordinate]);
 
   const requestedModuleParam = navRoute.params?.module;
   const requestedModule = ["flood", "earthquake"].includes(requestedModuleParam)
@@ -2235,6 +2305,13 @@ const {
         });
 
         if (initialLocation && mounted) {
+          const initialTimestamp = Number(current?.timestamp) || Date.now();
+          const initialAccuracy = Number(current?.coords?.accuracy);
+          acceptedNavigationFixRef.current = {
+            coordinate: initialLocation,
+            timestamp: initialTimestamp,
+          };
+          setNavigationGpsAccuracy(Number.isFinite(initialAccuracy) ? initialAccuracy : null);
           setGpsLocation(initialLocation);
           setCurrentLocation(initialLocation);
         }
@@ -2252,6 +2329,31 @@ const {
             });
 
             if (!nextLocation) return;
+            const accuracy = Number(position?.coords?.accuracy);
+            const timestamp = Number(position?.timestamp) || Date.now();
+            const previousFix = acceptedNavigationFixRef.current;
+            const elapsedSeconds = previousFix
+              ? Math.max(0.2, (timestamp - previousFix.timestamp) / 1000)
+              : Infinity;
+            const movedMeters = previousFix
+              ? distanceMetersBetween(previousFix.coordinate, nextLocation) || 0
+              : 0;
+            const impliedSpeed = movedMeters / elapsedSeconds;
+            const inaccurate = Number.isFinite(accuracy) && accuracy > MAX_NAVIGATION_GPS_ACCURACY_METERS;
+            const impossibleJump = previousFix && impliedSpeed > MAX_NAVIGATION_SPEED_METERS_PER_SECOND;
+
+            if (isNavigating && (inaccurate || impossibleJump)) {
+              if (__DEV__) {
+                console.log("[navigation] GPS fix rejected", {
+                  accuracy: Number.isFinite(accuracy) ? Math.round(accuracy) : null,
+                  impliedSpeed: Math.round(impliedSpeed),
+                });
+              }
+              return;
+            }
+
+            acceptedNavigationFixRef.current = { coordinate: nextLocation, timestamp };
+            setNavigationGpsAccuracy(Number.isFinite(accuracy) ? accuracy : null);
             setGpsLocation(nextLocation);
             setCurrentLocation(nextLocation);
           }
@@ -2276,7 +2378,7 @@ const {
       mounted = false;
       subscription?.remove?.();
     };
-  }, [evacGpsDebugMode, isEvac]);
+  }, [evacGpsDebugMode, isEvac, isNavigating]);
 
   useEffect(() => {
     const previousValue = previousEvacGpsDebugModeRef.current;
@@ -2528,13 +2630,14 @@ const {
     }
   }, [isEvac, normalizedSelectedEvac, panelState, setPanelState]);
 
+  const routingOrigin = navigationRoutingOrigin || routeStartCoordinate;
   const routing = useRouting({
     enabled:
       isEvac &&
       routeRequested &&
       !!normalizedSelectedEvac &&
       (evacGpsDebugMode || Boolean(toMarkerCoordinate(gpsLocation))),
-    from: [routeStartCoordinate.latitude, routeStartCoordinate.longitude],
+    from: [routingOrigin.latitude, routingOrigin.longitude],
     to: normalizedSelectedEvac
       ? {
           lat: normalizedSelectedEvac.latitude,
@@ -2543,6 +2646,7 @@ const {
       : null,
     mode: travelMode,
     incidents: normalizedIncidents,
+    requestVersion: rerouteRequestVersion,
   });
 
   const activeNavigationRoute = useMemo(
@@ -2560,7 +2664,89 @@ const {
   useEffect(() => {
     routeHazardAlertedRef.current.clear();
     setRouteHazardBanner(null);
+    navigationProgressIndexRef.current = 0;
+    navigationProgressCandidateRef.current = { index: 0, count: 0 };
+    setNavigationProgressIndex(0);
+    offRouteCountRef.current = 0;
   }, [activeNavigationRouteKey]);
+
+  useEffect(() => {
+    if (!isNavigating || !activeNavigationRoute?.coords?.length) {
+      offRouteCountRef.current = 0;
+      return;
+    }
+
+    const progress = getProjectedRouteProgress(activeNavigationRoute.coords, currentLocation, {
+      previousIndex: navigationProgressIndexRef.current,
+    });
+    const previousIndex = navigationProgressIndexRef.current;
+    let nextIndex = Math.max(previousIndex, progress.segmentIndex);
+    if (nextIndex > previousIndex + 12) {
+      const candidate = navigationProgressCandidateRef.current;
+      const matchesCandidate = Math.abs(candidate.index - nextIndex) <= 3;
+      const confirmationCount = matchesCandidate ? candidate.count + 1 : 1;
+      navigationProgressCandidateRef.current = { index: nextIndex, count: confirmationCount };
+      if (confirmationCount < 2) nextIndex = previousIndex;
+    } else {
+      navigationProgressCandidateRef.current = { index: nextIndex, count: 0 };
+    }
+    if (nextIndex !== previousIndex) {
+      navigationProgressIndexRef.current = nextIndex;
+      setNavigationProgressIndex(nextIndex);
+    }
+    setNextRoutePoint(progress.nextPoint);
+    const smoothedHeading = smoothlyInterpolateHeading(
+      smoothedNavigationHeadingRef.current,
+      progress.heading
+    );
+    smoothedNavigationHeadingRef.current = smoothedHeading;
+    setCurrentHeading(smoothedHeading);
+
+    const reliableAccuracy =
+      evacGpsDebugMode ||
+      navigationGpsAccuracy == null ||
+      navigationGpsAccuracy <= MAX_NAVIGATION_GPS_ACCURACY_METERS;
+    const isOffRoute = reliableAccuracy && progress.distanceMeters > OFF_ROUTE_DISTANCE_METERS;
+    offRouteCountRef.current = isOffRoute ? offRouteCountRef.current + 1 : 0;
+
+    if (__DEV__) {
+      console.log("[navigation] route progress", {
+        gpsAccuracy: navigationGpsAccuracy == null ? null : Math.round(navigationGpsAccuracy),
+        distanceFromRoute: Math.round(progress.distanceMeters),
+        progressIndex: nextIndex,
+        offRouteCount: offRouteCountRef.current,
+      });
+    }
+
+    const now = Date.now();
+    if (
+      offRouteCountRef.current < OFF_ROUTE_CONFIRMATION_COUNT ||
+      isRerouting ||
+      now - lastRerouteAtRef.current < REROUTE_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    lastRerouteAtRef.current = now;
+    offRouteCountRef.current = 0;
+    rerouteRequestIdRef.current += 1;
+    setIsRerouting(true);
+    setNavigationRoutingOrigin(currentLocation);
+    setRerouteRequestVersion(rerouteRequestIdRef.current);
+    if (__DEV__) {
+      console.log("[navigation] rerouting started", {
+        requestId: rerouteRequestIdRef.current,
+        distanceFromRoute: Math.round(progress.distanceMeters),
+      });
+    }
+  }, [
+    activeNavigationRoute,
+    currentLocation,
+    evacGpsDebugMode,
+    isNavigating,
+    isRerouting,
+    navigationGpsAccuracy,
+  ]);
 
   const updateNavigationCamera = useCallback(
     (force = false) => {
@@ -2587,10 +2773,16 @@ const {
       )
         ? currentLocation
         : routeStartCoordinate;
-      const { snappedLocation, nextPoint, heading } = getNearestRouteProgress(
+      const { nextPoint, heading: routeHeading } = getProjectedRouteProgress(
         coords,
-        rawLocation
+        rawLocation,
+        { previousIndex: navigationProgressIndexRef.current }
       );
+      const heading = smoothlyInterpolateHeading(
+        smoothedNavigationHeadingRef.current,
+        routeHeading
+      );
+      smoothedNavigationHeadingRef.current = heading;
       const now = Date.now();
 
       setCurrentLocation((previous) =>
@@ -2711,6 +2903,7 @@ const {
       coords,
       origin
     );
+    smoothedNavigationHeadingRef.current = heading;
     const cameraCenter = isValidCoordinate(origin?.latitude, origin?.longitude)
       ? origin
       : snappedLocation;
@@ -2741,10 +2934,32 @@ const {
   useEffect(() => {
     if (!routeRequested || !routing.routes?.length) return;
 
-    setRoutes(routing.routes);
-    setActiveRoute(routing.routes[0]);
-
     const firstRoute = routing.routes[0];
+    if (isRerouting && firstRoute.requestVersion !== rerouteRequestVersion) {
+      if (__DEV__) {
+        console.log("[navigation] stale rerouting response rejected", {
+          expected: rerouteRequestVersion,
+          received: firstRoute.requestVersion,
+        });
+      }
+      return;
+    }
+
+    setRoutes(routing.routes);
+    setActiveRoute(firstRoute);
+    if (isRerouting) {
+      setIsRerouting(false);
+      navigationProgressIndexRef.current = 0;
+      navigationProgressCandidateRef.current = { index: 0, count: 0 };
+      setNavigationProgressIndex(0);
+      if (__DEV__) {
+        console.log("[navigation] rerouting completed", {
+          requestId: rerouteRequestVersion,
+          routePoints: safeArray(firstRoute.coords).length,
+        });
+      }
+    }
+
     const routeCameraKey = [
       normalizedSelectedEvac?._id || "",
       normalizedSelectedEvac?.latitude || "",
@@ -2778,11 +2993,13 @@ const {
     }
   }, [
     isBaseMapLoaded,
+    isRerouting,
     normalizedSelectedEvac,
     panelState,
     routeRequested,
     routeStartCoordinate,
     routing.routes,
+    rerouteRequestVersion,
     setActiveRoute,
     setRoutes,
     travelMode,
@@ -3436,7 +3653,11 @@ const shouldShowIncidentMarkers =
   const canSubmitIncidentFromLocation = incidentDebugMode || incidentPointInsideJaen;
 
   const navigationTopSummary = useMemo(() => {
-    const maneuver = getUpcomingManeuver(activeNavigationRoute?.coords, currentLocation);
+    const maneuver = getUpcomingManeuver(
+      activeNavigationRoute?.coords,
+      currentLocation,
+      navigationProgressIndex
+    );
     const nextKm = distanceKm(currentLocation, maneuver.point || nextRoutePoint);
     const distanceToNextTurn =
       nextKm == null
@@ -3459,7 +3680,7 @@ const shouldShowIncidentMarkers =
         : "--",
       travelModeLabel: travelMode.charAt(0).toUpperCase() + travelMode.slice(1),
     };
-  }, [activeNavigationRoute, currentLocation, nextRoutePoint, normalizedSelectedEvac, travelMode]);
+  }, [activeNavigationRoute, currentLocation, navigationProgressIndex, nextRoutePoint, normalizedSelectedEvac, travelMode]);
 
   const exitNavigationMode = useCallback(() => {
     setIsNavigating(false);
@@ -3490,6 +3711,17 @@ const shouldShowIncidentMarkers =
     setRouteRequested,
     setRoutes,
   ]);
+
+  useEffect(() => {
+    if (!isRerouting || routing.loading || !routing.error) return;
+    setIsRerouting(false);
+    if (__DEV__) {
+      console.log("[navigation] rerouting failed; keeping previous route", {
+        requestId: rerouteRequestVersion,
+        message: routing.error?.message,
+      });
+    }
+  }, [isRerouting, rerouteRequestVersion, routing.error, routing.loading]);
 
   useEffect(() => {
     const unsubscribe = navigation.addListener("beforeRemove", (event) => {
@@ -4627,7 +4859,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
           routes.slice(0, 3).map((route, index) => {
             const coordinates =
               panelState === "NAVIGATION"
-                ? getNavigationRouteCoords(route.coords, currentLocation)
+                ? getNavigationRouteCoords(route.coords, navigationProgressIndex)
                 : safeArray(route.coords).filter((coordinate) =>
                     isValidCoordinate(coordinate?.latitude, coordinate?.longitude)
                   );
@@ -4704,7 +4936,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
           </View>
           <View style={styles.wazeTopCopy}>
             <Text style={[styles.wazeTopInstruction, themedOverlay.text]} numberOfLines={1}>
-              {navigationTopSummary.instruction}
+              {isRerouting ? "Rerouting…" : navigationTopSummary.instruction}
             </Text>
           </View>
           <Text style={[styles.wazeTopDistance, themedOverlay.primaryText]}>

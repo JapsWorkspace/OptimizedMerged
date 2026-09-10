@@ -19,13 +19,58 @@ const SPEED_KMH = {
   driving: 40,
 };
 
-const MAX_ROUTE_POINTS = 650;
+const MAX_ROUTE_POINTS = 4000;
 const MAX_ROUTE_ALTERNATIVES = 3;
 
 function isValidCoordinate(latitude, longitude) {
   return Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude)) &&
     Number(latitude) >= -90 && Number(latitude) <= 90 &&
     Number(longitude) >= -180 && Number(longitude) <= 180;
+}
+
+function pointToSegmentDistanceMeters(point, start, end) {
+  const latitudeScale = 111320;
+  const longitudeScale = latitudeScale * Math.cos((point.latitude * Math.PI) / 180);
+  const bx = (end.longitude - start.longitude) * longitudeScale;
+  const by = (end.latitude - start.latitude) * latitudeScale;
+  const px = (point.longitude - start.longitude) * longitudeScale;
+  const py = (point.latitude - start.latitude) * latitudeScale;
+  const lengthSquared = bx * bx + by * by;
+  const fraction = lengthSquared > 0
+    ? Math.max(0, Math.min(1, (px * bx + py * by) / lengthSquared))
+    : 0;
+  return Math.hypot(px - bx * fraction, py - by * fraction);
+}
+
+function simplifyRouteCoordinates(points, toleranceMeters) {
+  if (points.length <= 2) return points;
+  const keep = new Uint8Array(points.length);
+  keep[0] = 1;
+  keep[points.length - 1] = 1;
+  const stack = [[0, points.length - 1]];
+
+  while (stack.length) {
+    const [startIndex, endIndex] = stack.pop();
+    let maxDistance = 0;
+    let splitIndex = -1;
+    for (let index = startIndex + 1; index < endIndex; index += 1) {
+      const currentDistance = pointToSegmentDistanceMeters(
+        points[index],
+        points[startIndex],
+        points[endIndex]
+      );
+      if (currentDistance > maxDistance) {
+        maxDistance = currentDistance;
+        splitIndex = index;
+      }
+    }
+    if (splitIndex > 0 && maxDistance > toleranceMeters) {
+      keep[splitIndex] = 1;
+      stack.push([startIndex, splitIndex], [splitIndex, endIndex]);
+    }
+  }
+
+  return points.filter((_, index) => keep[index]);
 }
 
 function sanitizeRouteCoordinates(rawCoordinates) {
@@ -38,12 +83,16 @@ function sanitizeRouteCoordinates(rawCoordinates) {
     .filter(Boolean);
 
   if (points.length <= MAX_ROUTE_POINTS) return points;
-  const sampled = [];
-  const lastIndex = points.length - 1;
-  for (let index = 0; index < MAX_ROUTE_POINTS; index += 1) {
-    sampled.push(points[Math.round((index * lastIndex) / (MAX_ROUTE_POINTS - 1))]);
+
+  // Geometry-aware simplification retains curves and intersections much more
+  // faithfully than uniform sampling, especially on long navigation routes.
+  let toleranceMeters = 1.5;
+  let simplified = points;
+  while (simplified.length > MAX_ROUTE_POINTS && toleranceMeters <= 96) {
+    simplified = simplifyRouteCoordinates(points, toleranceMeters);
+    toleranceMeters *= 1.75;
   }
-  return sampled;
+  return simplified;
 }
 
 function formatDuration(totalMinutes) {
@@ -206,19 +255,19 @@ export default function useRouting({
   to,
   mode = "driving",
   incidents = [],
+  requestVersion = 0,
 }) {
   const [routes, setRoutes] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const inFlightRef = useRef(false);
   const lastKeyRef = useRef(null);
+  const requestSequenceRef = useRef(0);
 
   /* ✅ TEMP DEBUG — FORCE CRITICAL INCIDENT AT ROUTE START */
   useEffect(() => {
     lastKeyRef.current = null;
-    inFlightRef.current = false;
-  }, [mode, enabled]);
+  }, [mode, enabled, requestVersion]);
 
   useEffect(() => {
     if (!enabled || !from || !to) {
@@ -241,12 +290,10 @@ export default function useRouting({
     }
 
     const profile = OSRM_PROFILE_MAP[mode] || "driving";
-    const key = `${profile}:${fromLatitude},${fromLongitude}->${toLatitude},${toLongitude}`;
+    const key = `${profile}:${fromLatitude},${fromLongitude}->${toLatitude},${toLongitude}:${requestVersion}`;
     if (lastKeyRef.current === key) return undefined;
     lastKeyRef.current = key;
-
-    if (inFlightRef.current) return undefined;
-    inFlightRef.current = true;
+    const requestSequence = ++requestSequenceRef.current;
     let cancelled = false;
     const abortController = new AbortController();
 
@@ -292,7 +339,7 @@ export default function useRouting({
         return wp ? requestRoute(wp) : res;
       })
       .then((res) => {
-        if (cancelled) return;
+        if (cancelled || requestSequence !== requestSequenceRef.current) return;
         const responseRoutes = Array.isArray(res?.data?.routes)
           ? res.data.routes.slice(0, MAX_ROUTE_ALTERNATIVES)
           : [];
@@ -306,6 +353,7 @@ export default function useRouting({
 
           return {
             id: `${key}-${i}`,
+            requestVersion,
             coords,
             distance: Number.isFinite(distance) ? distance : 0,
             steps: r.legs?.[0]?.steps || [],
@@ -341,7 +389,7 @@ export default function useRouting({
         if (safe.length) recommendedId = safe[0].id;
         else if (risky.length) recommendedId = risky[0].id;
 
-        if (!cancelled) setRoutes(
+        if (!cancelled && requestSequence === requestSequenceRef.current) setRoutes(
           final.map((r) => ({
             ...r,
             isRecommended: r.id === recommendedId,
@@ -349,7 +397,7 @@ export default function useRouting({
         );
       })
       .catch((requestError) => {
-        if (!cancelled && requestError?.code !== "ERR_CANCELED") {
+        if (!cancelled && requestSequence === requestSequenceRef.current && requestError?.code !== "ERR_CANCELED") {
           console.warn("[evac-route] route request failed", requestError?.message);
           setRoutes([]);
           setError(requestError);
@@ -357,7 +405,6 @@ export default function useRouting({
       })
       .finally(() => {
         if (!cancelled) {
-          inFlightRef.current = false;
           setLoading(false);
         }
       });
@@ -365,10 +412,9 @@ export default function useRouting({
     return () => {
       cancelled = true;
       abortController.abort();
-      inFlightRef.current = false;
       setLoading(false);
     };
-  }, [enabled, from?.[0], from?.[1], to?.lat, to?.lng, mode, incidents]);
+  }, [enabled, from?.[0], from?.[1], to?.lat, to?.lng, mode, incidents, requestVersion]);
 
   return { routes, loading, error };
 }
