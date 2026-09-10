@@ -6433,11 +6433,22 @@ function ModulePanel({
               ]}
               disabled={evacGpsLocating}
               onPress={() => {
-                setEvacGpsDebugMode((value) => {
-                  const nextValue = !value;
-                  if (!nextValue) setGpsLocation(null);
-                  return nextValue;
+                const nextValue = !evacGpsDebugMode;
+                // Tear down the current route before changing its origin.
+                // iOS was previously reconciling the old route/marker against
+                // a cleared GPS coordinate in the same native map update.
+                setRouteRequested(false);
+                setRoutes([]);
+                setActiveRoute(null);
+                setFollowMode(false);
+                if (panelState === "ROUTE_SELECTION") {
+                  setPanelState("PLACE_INFO");
+                }
+                if (!nextValue) setGpsLocation(null);
+                console.log("[evac-route] location source changed", {
+                  source: nextValue ? "debug" : "gps",
                 });
+                setEvacGpsDebugMode(nextValue);
               }}
             >
               <Ionicons

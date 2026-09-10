@@ -221,7 +221,13 @@ export default function useRouting({
   }, [mode, enabled]);
 
   useEffect(() => {
-    if (!enabled || !from || !to) return undefined;
+    if (!enabled || !from || !to) {
+      // A location-source change can disable routing while an OSRM request is
+      // active. Always leave the hook in a settled state after cancellation.
+      setLoading(false);
+      setRoutes([]);
+      return undefined;
+    }
 
     const fromLatitude = Number(from?.[0]);
     const fromLongitude = Number(from?.[1]);
@@ -360,6 +366,7 @@ export default function useRouting({
       cancelled = true;
       abortController.abort();
       inFlightRef.current = false;
+      setLoading(false);
     };
   }, [enabled, from?.[0], from?.[1], to?.lat, to?.lng, mode, incidents]);
 
