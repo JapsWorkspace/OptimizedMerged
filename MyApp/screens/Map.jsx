@@ -2081,6 +2081,7 @@ const {
   const isModuleDismissTransitionRef = useRef(false);
   const allowConfirmedNavigationExitRef = useRef(false);
   const [isNavigating, setIsNavigating] = useState(false);
+  const [routeMarkersTracking, setRouteMarkersTracking] = useState(true);
   const [followMode, setFollowMode] = useState(false);
   const [currentHeading, setCurrentHeading] = useState(0);
   const [currentLocation, setCurrentLocation] = useState(USER_POS);
@@ -2099,6 +2100,13 @@ const {
   const [isModuleDismissTransitioning, setIsModuleDismissTransitioning] = useState(false);
   const [isReturningToIncidentMap, setIsReturningToIncidentMap] = useState(false);
   const [hazardMode, setHazardMode] = useState("flood");
+
+  useEffect(() => {
+    if (!routeRequested && !isNavigating) return undefined;
+    setRouteMarkersTracking(true);
+    const timerId = setTimeout(() => setRouteMarkersTracking(false), 800);
+    return () => clearTimeout(timerId);
+  }, [isNavigating, routeRequested]);
 
   useEffect(
     () => () => {
@@ -4635,13 +4643,13 @@ if (!incidentDebugMode && !currentLocationFeature) {
             );
           })}
 
-        {Platform.OS !== "ios" && isEvac && (routeRequested || isNavigating) && routeDestinationCoordinate && (
+        {isEvac && (routeRequested || isNavigating) && routeDestinationCoordinate && (
           <SafeMarker
             key="evac-route-destination"
             coordinate={routeDestinationCoordinate}
             anchor={{ x: 0.5, y: 0.96 }}
             zIndex={1450}
-            tracksViewChanges={false}
+            tracksViewChanges={routeMarkersTracking}
             title="Route destination"
             description={safeDisplayText(
               normalizedSelectedEvac?.name,
@@ -4660,7 +4668,7 @@ if (!incidentDebugMode && !currentLocationFeature) {
             zIndex={1500}
             flat
             rotation={currentHeading}
-            tracksViewChanges={false}
+            tracksViewChanges={routeMarkersTracking}
           >
             <NavigationArrowMarker heading={0} />
           </Marker.Animated>
